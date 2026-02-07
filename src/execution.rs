@@ -76,32 +76,34 @@ impl OrderExecutor {
         report_tx: mpsc::Sender<ExecutionReport>,
         token_registry: Arc<TokenIdRegistry>,
     ) -> Self {
-        // Configure HTTP client for minimum latency
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(config.network.order_timeout_ms))
-            .pool_max_idle_per_host(10)
-            .tcp_nodelay(true)
-            .user_agent("polymorph-hft/1.0");
-
         // SSH tunnel support: if rest_url has a non-standard port (e.g. :8443),
         // resolve the hostname to localhost so traffic routes through the SSH tunnel.
         // This bypasses Cloudflare WAF blocking POST requests from datacenter IPs.
         // Usage: set POLYMARKET_REST_URL=https://clob.polymarket.com:8443
         //        and run: ssh -R 8443:clob.polymarket.com:443 user@VPS_IP -N
-        {
+        let tunnel_mode = {
             let url = &config.polymarket.rest_url;
             let after_scheme = url.strip_prefix("https://").unwrap_or(url);
-            if let Some(colon) = after_scheme.find(':') {
-                let host = &after_scheme[..colon];
+            after_scheme.find(':').and_then(|colon| {
                 let port_str = &after_scheme[colon + 1..];
-                if let Ok(port) = port_str.parse::<u16>() {
-                    builder = builder.resolve(
-                        host,
-                        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-                    );
-                    info!("SSH tunnel mode: {} -> localhost:{}", host, port);
-                }
-            }
+                port_str.parse::<u16>().ok().map(|port| (after_scheme[..colon].to_string(), port))
+            })
+        };
+
+        // Configure HTTP client — use longer timeout in tunnel mode (round trip through home PC)
+        let timeout_ms = if tunnel_mode.is_some() { 2000 } else { config.network.order_timeout_ms };
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms))
+            .pool_max_idle_per_host(10)
+            .tcp_nodelay(true)
+            .user_agent("polymorph-hft/1.0");
+
+        if let Some((ref host, port)) = tunnel_mode {
+            builder = builder.resolve(
+                host,
+                std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            );
+            info!("SSH tunnel mode: {} -> localhost:{} (timeout={}ms)", host, port, timeout_ms);
         }
 
         let client = builder.build().expect("Failed to create HTTP client");

@@ -232,6 +232,13 @@ async fn main() -> anyhow::Result<()> {
                 warn!("⚠️  Could not check USDC allowance: {} (continuing anyway)", e);
             }
         }
+        // Set capital limit from actual on-chain USDC.e balance
+        match executor.check_and_set_capital_from_balance().await {
+            Ok(_) => {}
+            Err(e) => {
+                warn!("⚠️  Could not check USDC.e balance: {} (using default capital limit)", e);
+            }
+        }
     }
     
     // Spawn all async tasks

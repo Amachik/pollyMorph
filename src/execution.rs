@@ -16,6 +16,7 @@ use sha2::Sha256;
 use base64::{Engine as _, engine::general_purpose};
 use parking_lot::Mutex;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering as AtomicOrdering};
@@ -57,6 +58,11 @@ pub struct OrderExecutor {
     max_orders_per_sec: u64,
     /// Pre-formatted address string (avoids hex::encode per order)
     cached_address: String,
+    /// USDC committed to open BUY orders (in micro-USDC, i.e. * 1e6)
+    /// Used to prevent overcommitting limited capital
+    committed_capital_micro: AtomicU64,
+    /// Maximum USDC to commit to open orders (in micro-USDC)
+    max_capital_micro: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +72,8 @@ struct PendingOrder {
     expected_profit_bps: i32,
     /// Cumulative filled amount reported so far (for computing deltas on partial fills)
     cumulative_filled: Decimal,
+    /// USDC cost of this order (micro-USDC) for capital release on cancel/fill
+    cost_micro: u64,
 }
 
 impl OrderExecutor {
@@ -110,6 +118,8 @@ impl OrderExecutor {
         
         // Pre-compute address string before moving signer into struct
         let cached_address = format!("0x{}", hex::encode(signer.address().as_slice()));
+        // Pre-compute default capital limit before moving config
+        let default_max_capital = (config.trading.default_order_size.to_f64().unwrap_or(5.0) * 4.0 * 1_000_000.0) as u64;
 
         Self {
             // HOT PATH DATA first
@@ -132,6 +142,8 @@ impl OrderExecutor {
             rate_limit_window_sec: AtomicU64::new(0),
             max_orders_per_sec: 15, // 15 orders/sec — balanced between safety and competitiveness
             cached_address,
+            committed_capital_micro: AtomicU64::new(0),
+            max_capital_micro: AtomicU64::new(default_max_capital),
         }
     }
     
@@ -269,10 +281,30 @@ impl OrderExecutor {
             order.post_only = true;
         }
         
-        // 4. Submit order via REST API
+        // 4. Capital gate: prevent overcommitting limited USDC balance
+        let order_cost_micro = if signal.side == Side::Buy {
+            // BUY cost = size * price in USDC (micro-USDC = * 1e6)
+            let cost = (signal.size * rounded_price).to_f64().unwrap_or(0.0);
+            let cost_micro = (cost * 1_000_000.0) as u64;
+            let current = self.committed_capital_micro.load(AtomicOrdering::Relaxed);
+            if current + cost_micro > self.max_capital_micro.load(AtomicOrdering::Relaxed) {
+                return Err(ExecutionError::ApiError(format!(
+                    "Capital limit: committed ${:.2} + ${:.2} > max ${:.2}",
+                    current as f64 / 1e6, cost as f64, self.max_capital_micro.load(AtomicOrdering::Relaxed) as f64 / 1e6
+                )));
+            }
+            cost_micro
+        } else {
+            0 // SELL orders don't commit USDC
+        };
+
+        // 5. Submit order via REST API
         let order_id = self.submit_order(&order).await?;
         
-        // 5. Track pending order (use TSC as timestamp - converted later if needed)
+        // 6. Commit capital and track pending order
+        if order_cost_micro > 0 {
+            self.committed_capital_micro.fetch_add(order_cost_micro, AtomicOrdering::Relaxed);
+        }
         {
             let mut pending = self.pending_orders.lock();
             pending.insert(order_id.clone(), PendingOrder {
@@ -280,6 +312,7 @@ impl OrderExecutor {
                 sent_at_ns: Self::now_ns(),
                 expected_profit_bps: signal.expected_profit_bps,
                 cumulative_filled: Decimal::ZERO,
+                cost_micro: order_cost_micro,
             });
         }
         
@@ -451,6 +484,23 @@ impl OrderExecutor {
         self.signer.cache_stats()
     }
 
+    /// Set maximum capital to commit (in USDC). Called at startup from CLOB balance.
+    pub fn set_max_capital_usdc(&self, usdc: f64) {
+        let micro = (usdc * 1_000_000.0) as u64;
+        self.max_capital_micro.store(micro, AtomicOrdering::Relaxed);
+        info!("Capital limit set to ${:.2}", usdc);
+    }
+
+    /// Get current committed capital in USDC
+    pub fn committed_capital_usdc(&self) -> f64 {
+        self.committed_capital_micro.load(AtomicOrdering::Relaxed) as f64 / 1e6
+    }
+
+    /// Get max capital in USDC
+    pub fn max_capital_usdc(&self) -> f64 {
+        self.max_capital_micro.load(AtomicOrdering::Relaxed) as f64 / 1e6
+    }
+
     /// Cancel an order.
     /// Matches official SDK: DELETE /order with body {"orderID": order_id}
     pub async fn cancel_order(&self, order_id: &str) -> Result<(), ExecutionError> {
@@ -481,7 +531,13 @@ impl OrderExecutor {
             return Err(ExecutionError::ApiError(format!("{}: {}", status, body)));
         }
 
-        self.pending_orders.lock().remove(order_id);
+        if let Some(removed) = self.pending_orders.lock().remove(order_id) {
+            if removed.cost_micro > 0 {
+                self.committed_capital_micro.fetch_sub(removed.cost_micro.min(
+                    self.committed_capital_micro.load(AtomicOrdering::Relaxed)
+                ), AtomicOrdering::Relaxed);
+            }
+        }
 
         info!("Order cancelled: {}", order_id);
         Ok(())
@@ -511,8 +567,17 @@ impl OrderExecutor {
             return Err(ExecutionError::ApiError(format!("{}: {}", status, body)));
         }
 
-        let count = self.pending_orders.lock().len() as u32;
-        self.pending_orders.lock().clear();
+        let mut pending = self.pending_orders.lock();
+        let count = pending.len() as u32;
+        let total_released: u64 = pending.values().map(|p| p.cost_micro).sum();
+        pending.clear();
+        drop(pending);
+        if total_released > 0 {
+            let current = self.committed_capital_micro.load(AtomicOrdering::Relaxed);
+            self.committed_capital_micro.store(
+                current.saturating_sub(total_released), AtomicOrdering::Relaxed
+            );
+        }
 
         warn!("Cancelled all {} orders", count);
         Ok(count)
@@ -578,7 +643,17 @@ impl OrderExecutor {
         let pending_info = {
             let mut pending = self.pending_orders.lock();
             if is_terminal {
-                pending.remove(order_id)
+                let removed = pending.remove(order_id);
+                // Release committed capital for terminal orders
+                if let Some(ref p) = removed {
+                    if p.cost_micro > 0 {
+                        let current = self.committed_capital_micro.load(AtomicOrdering::Relaxed);
+                        self.committed_capital_micro.store(
+                            current.saturating_sub(p.cost_micro), AtomicOrdering::Relaxed
+                        );
+                    }
+                }
+                removed
             } else {
                 // Peek: clone the info we need but leave the entry
                 pending.get(order_id).cloned()
@@ -797,6 +872,52 @@ impl OrderExecutor {
         }
 
         Ok(allowance)
+    }
+
+    /// Check USDC.e balance on-chain and set capital limit accordingly.
+    /// Returns balance in raw units (6 decimals).
+    pub async fn check_and_set_capital_from_balance(&self) -> Result<u128, ExecutionError> {
+        use ethers::prelude::*;
+        use ethers::abi::Token;
+
+        let rpc_url = &self.config.polymarket.polygon_rpc;
+        let provider = Provider::<Http>::try_from(rpc_url.as_str())
+            .map_err(|e| ExecutionError::NetworkError(format!("RPC provider: {}", e)))?;
+
+        let usdc_addr: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            .parse()
+            .map_err(|e| ExecutionError::SigningFailed(format!("Bad USDC addr: {}", e)))?;
+
+        let owner_addr = self.signer.address();
+        let owner: Address = Address::from_slice(owner_addr.as_slice());
+
+        // ERC20 balanceOf(address) selector = 0x70a08231
+        let call_data = ethers::abi::encode(&[Token::Address(owner)]);
+        let mut full_data = vec![0x70, 0xa0, 0x82, 0x31];
+        full_data.extend_from_slice(&call_data);
+
+        let tx = TransactionRequest::new()
+            .to(usdc_addr)
+            .data(full_data);
+
+        let result = provider.call(&tx.into(), None).await
+            .map_err(|e| ExecutionError::NetworkError(format!("balanceOf call: {}", e)))?;
+
+        let balance = if result.len() >= 32 {
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&result[16..32]);
+            u128::from_be_bytes(bytes)
+        } else {
+            0
+        };
+
+        let usdc_balance = balance as f64 / 1_000_000.0;
+        // Set capital limit to 80% of balance (keep 20% buffer for fees/slippage)
+        let capital_limit = usdc_balance * 0.80;
+        self.set_max_capital_usdc(capital_limit);
+        info!("💰 USDC.e balance: ${:.2}, capital limit: ${:.2}", usdc_balance, capital_limit);
+
+        Ok(balance)
     }
 
     /// Get execution metrics

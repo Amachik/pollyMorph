@@ -340,8 +340,8 @@ impl PolymarketWs {
                                     snapshot.timestamp_ns = timestamp_ns;
                                     snapshot.bid_count = 1;
                                     snapshot.ask_count = 1;
-                                    snapshot.bids[0] = PriceLevel { price: bid, size, order_count: 1 };
-                                    snapshot.asks[0] = PriceLevel { price: ask, size, order_count: 1 };
+                                    snapshot.bids[0] = PriceLevel::new(bid, size, 1);
+                                    snapshot.asks[0] = PriceLevel::new(ask, size, 1);
                                     
                                     let _ = self.event_tx.send(WsEvent::BookUpdate {
                                         market_id: pc.asset_id.clone(),

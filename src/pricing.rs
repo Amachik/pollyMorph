@@ -1140,7 +1140,10 @@ impl PricingEngine {
         let min_maker_spread = self.thresholds.min_profit_bps + maker_offset_bps;
         let min_required = min_maker_spread * 2;
         
-        let is_profitable = self.thresholds.is_profitable_2026(spread_bps, mid_price, force_maker);
+        // Always use maker profitability for check_market_making — we place LIMIT orders,
+        // not taker orders. Using taker fees (200-315 bps) makes most markets look unprofitable
+        // even though our maker orders only need to beat the maker rebate (~20 bps).
+        let is_profitable = self.thresholds.is_profitable_2026(spread_bps, mid_price, true);
         let spread_ok = spread_bps >= min_required;
         
         if !(is_profitable && spread_ok) {

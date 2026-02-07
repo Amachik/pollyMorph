@@ -283,10 +283,10 @@ impl Config {
                 grid: GridConfig::default(),
             },
             risk: RiskConfig {
-                daily_bankroll: Decimal::new(22, 0), // $22 wallet
-                kill_switch_threshold_pct: Decimal::new(20, 0), // 20% = ~$4.40 max daily loss
-                max_position_per_market: Decimal::new(12, 0), // $12 max per market (~55% of bankroll)
-                max_total_exposure: Decimal::new(22, 0), // $22 total (100% of bankroll)
+                daily_bankroll: Decimal::new(50, 0), // $50 target wallet
+                kill_switch_threshold_pct: Decimal::new(15, 0), // 15% = $7.50 max daily loss
+                max_position_per_market: Decimal::new(20, 0), // $20 max per market (40% of bankroll)
+                max_total_exposure: Decimal::new(40, 0), // $40 total (80% of bankroll, 20% reserve)
                 loss_cooldown_ms: 60000, // 1 minute cooldown
                 gap_threshold_pct: Decimal::new(5, 0), // 5% gap triggers stop
                 volatility_spike_threshold: 2.0, // 2x baseline = spike

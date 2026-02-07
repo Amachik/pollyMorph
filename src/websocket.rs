@@ -219,14 +219,15 @@ impl PolymarketWs {
         }).await;
         
         // Subscribe to markets using Polymarket's format
-        // Format: {"assets_ids": ["token_id1", "token_id2"], "type": "market"}
+        // "type": "book" gives full order book snapshots (bids/asks) — required for signal generation
+        // "type": "market" only gives price_change events which don't contain book depth
         if !self.subscribed_markets.is_empty() {
             let subscribe_msg = serde_json::json!({
                 "assets_ids": self.subscribed_markets,
-                "type": "market"
+                "type": "book"
             });
             write.send(Message::Text(subscribe_msg.to_string())).await?;
-            debug!("Subscribed to {} markets", self.subscribed_markets.len());
+            info!("Subscribed to {} markets (book depth)", self.subscribed_markets.len());
         }
         
         // Pre-allocate buffer for SIMD JSON parsing
@@ -783,14 +784,24 @@ impl BinanceWs {
         let url = format!("{}/{}", self.config.exchanges.binance_ws, symbols.join("/"));
         info!("Connecting to Binance at {}", url);
         
+        let mut backoff_secs = 1u64;
         loop {
             match self.connect_and_process(&url).await {
-                Ok(_) => warn!("Binance WebSocket disconnected"),
+                Ok(_) => {
+                    warn!("Binance WebSocket disconnected");
+                    backoff_secs = 1; // reset on clean disconnect
+                }
                 Err(e) => {
-                    error!("Binance WebSocket error: {}", e);
+                    let err_str = e.to_string();
+                    // Binance geo-blocks US IPs with HTTP 451 — stop retrying
+                    if err_str.contains("451") {
+                        warn!("Binance geo-blocked (HTTP 451) — disabling Binance feed (non-critical)");
+                        return Ok(());
+                    }
+                    error!("Binance WebSocket error: {}", err_str);
                     let _ = self.event_tx.send(WsEvent::Error {
                         source: ConnectionSource::Binance,
-                        message: e.to_string(),
+                        message: err_str,
                     }).await;
                 }
             }
@@ -800,7 +811,8 @@ impl BinanceWs {
                 connected: false,
             }).await;
             
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(60); // exponential backoff, max 60s
         }
     }
     

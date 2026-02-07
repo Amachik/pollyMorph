@@ -431,9 +431,6 @@ impl OrderExecutor {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            if body.contains("Invalid order payload") {
-                error!("FULL PAYLOAD for invalid order:\n{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-            }
             error!("Order submission failed: {} - {}", status, body);
             return Err(ExecutionError::ApiError(format!("{}: {}", status, body)));
         }

@@ -444,7 +444,9 @@ impl OrderSigner {
     /// will still get different salts.
     fn generate_salt() -> u64 {
         use rand::Rng;
-        rand::thread_rng().gen()
+        // Cap at 2^53-1 (JS Number.MAX_SAFE_INTEGER) so the Polymarket server
+        // (Node.js) can parse the JSON number without precision loss.
+        rand::thread_rng().gen_range(0..=9_007_199_254_740_991u64)
     }
 
     /// Compute the EIP-712 order hash matching OrderStructs.sol exactly.

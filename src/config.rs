@@ -274,8 +274,8 @@ impl Config {
                 slippage_bps: 10,       // 0.10%
                 gas_cost_usd: Decimal::new(5, 2), // $0.05
                 min_profit_bps: 15,     // 0.15% minimum profit (thin edge, high volume)
-                default_order_size: Decimal::new(5, 0),   // $5 per order (20% of $25 bankroll)
-                max_order_size: Decimal::new(10, 0),      // $10 max (40% of bankroll)
+                default_order_size: Decimal::new(1, 0),   // $1 per order (scales with capital)
+                max_order_size: Decimal::new(10, 0),      // $10 max (safety cap)
                 maker_spread_offset_bps: 3, // 0.03% below market (tight quotes for priority)
                 maker_mode_enabled: true,
                 taker_mode_enabled: true,

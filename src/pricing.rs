@@ -1204,12 +1204,13 @@ impl PricingEngine {
         let market_id = MarketId::new([0u8; 32], token_id);
         // Dollar-value sizing: convert target USD amount to token count at current price
         // e.g. $1 target at price $0.50 = 2 tokens, at price $0.05 = 20 tokens
-        let target_usd = self.config.trading.default_order_size; // now treated as USD, not tokens
+        let target_usd = self.config.trading.default_order_size; // treated as USD, not tokens
         let order_tokens = if mid_price > Decimal::ZERO {
             (target_usd / mid_price).round_dp(0) // round to whole tokens
         } else {
-            Decimal::new(5, 0)
+            Decimal::ONE
         };
+        debug!("💲 Sizing: target_usd={}, mid={}, tokens={}", target_usd, mid_price, order_tokens);
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1218,7 +1219,7 @@ impl PricingEngine {
 
         // === SINGLE-LEVEL QUOTING (Level 2 disabled until capital > $100) ===
         let mut signals = Vec::with_capacity(2);
-        let min_size = Decimal::new(5, 0); // Polymarket minimum order size in tokens
+        let min_size = Decimal::ONE; // Polymarket minimum is 1 token
         let size = order_tokens.max(min_size);
 
         {

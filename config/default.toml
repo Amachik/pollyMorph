@@ -6,9 +6,11 @@ ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/"
 rest_url = "https://clob.polymarket.com"
 api_key = ""
 api_secret = ""
+api_passphrase = ""  # API passphrase from L1 key derivation
 private_key = ""  # Your wallet private key (hex, no 0x prefix)
 polygon_rpc = "https://polygon-rpc.com"
 clob_address = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+neg_risk_clob_address = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 
 [exchanges]
 binance_ws = "wss://stream.binance.com:9443/ws"
@@ -29,10 +31,10 @@ slippage_bps = 10
 gas_cost_usd = "0.05"
 # Minimum profit threshold in basis points
 min_profit_bps = 50
-# Default order size in USDC
-default_order_size = "100"
+# Default order size in USDC (dollar-value sizing: tokens = target_usd / price)
+default_order_size = "1"
 # Maximum order size in USDC
-max_order_size = "10000"
+max_order_size = "10"
 # Maker spread offset (how far below market to place maker orders)
 maker_spread_offset_bps = 5
 # Enable maker mode
@@ -80,13 +82,13 @@ batch_execution = true
 
 [risk]
 # Daily bankroll in USDC
-daily_bankroll = "100000"
-# Kill switch threshold as percentage (5% = lose $5000 on $100k bankroll)
-kill_switch_threshold_pct = "5"
+daily_bankroll = "50"
+# Kill switch threshold as percentage (15% = $7.50 max daily loss on $50 bankroll)
+kill_switch_threshold_pct = "15"
 # Maximum position size per market in USDC
-max_position_per_market = "10000"
+max_position_per_market = "20"
 # Maximum total exposure across all markets
-max_total_exposure = "50000"
+max_total_exposure = "40"
 # Cooldown period after loss in milliseconds
 loss_cooldown_ms = 60000
 

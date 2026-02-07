@@ -241,7 +241,7 @@ impl PolymarketWs {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            info!("📩 Raw WS message: {}", &text[..text.len().min(300)]);
+                            debug!("📩 Raw WS message: {}", &text[..text.len().min(300)]);
                             self.process_message(&text, &mut json_buffer).await;
                         }
                         Some(Ok(Message::Binary(data))) => {
@@ -304,7 +304,7 @@ impl PolymarketWs {
                 // Determine message type from event_type or msg_type field
                 let event_type = msg.event_type.or(msg.msg_type).unwrap_or("");
                 let has_price_changes = msg.price_changes.is_some();
-                info!("📦 Parsed msg: event_type='{}', has_price_changes={}", event_type, has_price_changes);
+                debug!("📦 Parsed msg: event_type='{}', has_price_changes={}", event_type, has_price_changes);
                 
                 match event_type {
                     "book" => {
@@ -322,10 +322,34 @@ impl PolymarketWs {
                         }
                     }
                     "price_change" => {
-                        // Price change with price_changes array
+                        // Price change events contain best_bid/best_ask — use them to build BookUpdate
                         if let Some(price_changes) = &msg.price_changes {
                             let market_id = msg.market.unwrap_or("unknown");
                             for pc in price_changes {
+                                // Emit BookUpdate if we have best_bid and best_ask
+                                let best_bid = pc.best_bid.as_ref().and_then(|s| Decimal::from_str(s).ok());
+                                let best_ask = pc.best_ask.as_ref().and_then(|s| Decimal::from_str(s).ok());
+                                
+                                if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                                    let size = pc.size.as_ref()
+                                        .and_then(|s| Decimal::from_str(s).ok())
+                                        .unwrap_or(Decimal::new(100, 0));
+                                    let token_id = hash_asset_id(&pc.asset_id);
+                                    let mut snapshot = OrderBookSnapshot::default();
+                                    snapshot.token_id = token_id;
+                                    snapshot.timestamp_ns = timestamp_ns;
+                                    snapshot.bid_count = 1;
+                                    snapshot.ask_count = 1;
+                                    snapshot.bids[0] = PriceLevel { price: bid, size, order_count: 1 };
+                                    snapshot.asks[0] = PriceLevel { price: ask, size, order_count: 1 };
+                                    
+                                    let _ = self.event_tx.send(WsEvent::BookUpdate {
+                                        market_id: pc.asset_id.clone(),
+                                        snapshot,
+                                    }).await;
+                                }
+                                
+                                // Also emit Trade event for flow tracking
                                 if let Ok(price) = Decimal::from_str(&pc.price) {
                                     let size = pc.size.as_ref()
                                         .and_then(|s| Decimal::from_str(s).ok())
@@ -334,9 +358,6 @@ impl PolymarketWs {
                                         Some("buy") | Some("BUY") => crate::types::Side::Buy,
                                         _ => crate::types::Side::Sell,
                                     };
-                                    
-                                    info!("📈 Price: {} @ {} ({})", &pc.asset_id[..pc.asset_id.len().min(16)], price, market_id);
-                                    
                                     let _ = self.event_tx.send(WsEvent::Trade {
                                         market_id: pc.asset_id.clone(),
                                         price,

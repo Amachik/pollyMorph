@@ -335,6 +335,10 @@ pub struct PriceChange {
     pub size: Option<String>,
     #[serde(default)]
     pub side: Option<String>,
+    #[serde(default)]
+    pub best_bid: Option<String>,
+    #[serde(default)]
+    pub best_ask: Option<String>,
 }
 
 /// Polymarket WebSocket message wrapper

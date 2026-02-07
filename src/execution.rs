@@ -709,13 +709,9 @@ impl OrderExecutor {
             }
         };
 
-        // Record trade in risk manager — but only for known orders with valid price.
-        // Unknown orders have market_id=0 and price=0 which would corrupt PnL tracking.
-        if report.market_id.token_id != 0 && report.price > Decimal::ZERO {
-            self.risk_manager.record_trade(&report);
-        }
-
-        // Send execution report (report handler also guards against corrupting inventory)
+        // Send execution report — the report handler is the single authoritative place
+        // for recording fills into both inventory tracker and risk manager.
+        // Do NOT call risk_manager.record_trade() here to avoid double-counting.
         let _ = self.report_tx.send(report).await;
     }
     

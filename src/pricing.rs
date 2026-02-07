@@ -55,11 +55,10 @@ impl FeeThresholds {
         if order_size.is_zero() {
             return 100; // Default high gas estimate
         }
-        let bps = (gas_usd / order_size * Decimal::new(10000, 0))
-            .to_string()
-            .parse::<u32>()
-            .unwrap_or(100);
-        bps
+        (gas_usd / order_size * Decimal::new(10000, 0))
+            .trunc()
+            .to_u32()
+            .unwrap_or(100)
     }
     
     /// Check if spread is profitable for taker execution

@@ -1,0 +1,364 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "title": "💰 Wallet Balance",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": 20 },
+            { "color": "green", "value": 25 }
+          ]},
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_wallet_balance_usdc", "refId": "A" }]
+    },
+    {
+      "title": "📊 Daily P&L",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": -1 },
+            { "color": "green", "value": 0 }
+          ]},
+          "unit": "currencyUSD",
+          "decimals": 4
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "id": 2,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_daily_pnl_usdc", "refId": "A" }]
+    },
+    {
+      "title": "📋 Active Orders",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "blue", "value": null },
+            { "color": "green", "value": 1 },
+            { "color": "yellow", "value": 5 },
+            { "color": "red", "value": 7 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 8, "y": 0 },
+      "id": 3,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_active_orders_total", "refId": "A" }]
+    },
+    {
+      "title": "📈 Total Exposure",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 15 },
+            { "color": "red", "value": 25 }
+          ]},
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 11, "y": 0 },
+      "id": 4,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_total_exposure_usdc", "refId": "A" }]
+    },
+    {
+      "title": "🛑 Kill Switch",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "text": "ARMED", "color": "green" }, "1": { "text": "TRIGGERED", "color": "red" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 14, "y": 0 },
+      "id": 5,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_kill_switch_triggered", "refId": "A" }]
+    },
+    {
+      "title": "🔗 Connections",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "green", "value": 1 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 17, "y": 0 },
+      "id": 6,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_ws_connection_status", "legendFormat": "{{source}}", "refId": "A" }]
+    },
+    {
+      "title": "Fills (Buy)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "fixedColor": "green", "mode": "fixed" } } },
+      "gridPos": { "h": 4, "w": 2, "x": 20, "y": 0 },
+      "id": 7,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_fills_total{side=\"buy\"}", "refId": "A" }]
+    },
+    {
+      "title": "Fills (Sell)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "color": { "fixedColor": "orange", "mode": "fixed" } } },
+      "gridPos": { "h": 4, "w": 2, "x": 22, "y": 0 },
+      "id": 8,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "expr": "polymorph_fills_total{side=\"sell\"}", "refId": "A" }]
+    },
+    {
+      "title": "Daily P&L Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "continuous-GrYlRd" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "spanNulls": true },
+          "unit": "currencyUSD",
+          "decimals": 4
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 10,
+      "options": { "tooltip": { "mode": "single" } },
+      "targets": [
+        { "expr": "polymorph_daily_pnl_usdc", "legendFormat": "Daily PnL", "refId": "A" },
+        { "expr": "polymorph_current_bankroll_usdc", "legendFormat": "Bankroll", "refId": "B" }
+      ]
+    },
+    {
+      "title": "Order Activity (rate/min)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "spanNulls": true }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 11,
+      "targets": [
+        { "expr": "rate(polymorph_orders_submitted_total{status=\"submitted\"}[1m])*60", "legendFormat": "Submitted/min", "refId": "A" },
+        { "expr": "rate(polymorph_fills_total[1m])*60", "legendFormat": "Fills/min {{side}}", "refId": "B" },
+        { "expr": "rate(polymorph_orders_cancelled_total[1m])*60", "legendFormat": "Cancelled/min", "refId": "C" },
+        { "expr": "rate(polymorph_orders_rate_limited_total[1m])*60", "legendFormat": "Rate Limited/min", "refId": "D" }
+      ]
+    },
+    {
+      "title": "Tick-to-Trade Latency (p50/p95/p99)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 5, "lineWidth": 2 },
+          "unit": "s"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 12,
+      "targets": [
+        { "expr": "histogram_quantile(0.50, rate(polymorph_tick_to_trade_latency_seconds_bucket[5m]))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, rate(polymorph_tick_to_trade_latency_seconds_bucket[5m]))", "legendFormat": "p95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(polymorph_tick_to_trade_latency_seconds_bucket[5m]))", "legendFormat": "p99", "refId": "C" }
+      ]
+    },
+    {
+      "title": "USDC Volume Traded (cumulative)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 30, "lineWidth": 2, "stacking": { "mode": "normal" } },
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 13,
+      "targets": [
+        { "expr": "polymorph_usdc_traded_by_side{side=\"buy\"}", "legendFormat": "Buy Volume", "refId": "A" },
+        { "expr": "polymorph_usdc_traded_by_side{side=\"sell\"}", "legendFormat": "Sell Volume", "refId": "B" }
+      ]
+    },
+    {
+      "title": "Inventory Position by Market",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 15, "lineWidth": 2, "spanNulls": true },
+          "unit": "short",
+          "decimals": 2
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "id": 14,
+      "targets": [
+        { "expr": "polymorph_inventory_position", "legendFormat": "Token {{token_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Order Flow Imbalance by Market",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "spanNulls": true },
+          "min": -1, "max": 1,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "yellow", "value": -0.3 },
+            { "color": "green", "value": -0.1 },
+            { "color": "yellow", "value": 0.1 },
+            { "color": "red", "value": 0.3 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "id": 15,
+      "targets": [
+        { "expr": "polymorph_order_flow_imbalance", "legendFormat": "Token {{token_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Market Spread (bps)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "short", "decimals": 0
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 16,
+      "targets": [
+        { "expr": "polymorph_market_spread_bps", "legendFormat": "{{market_id}}", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Active Orders + Exposure Over Time",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 10, "lineWidth": 2 }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Active Orders" }, "properties": [{ "id": "custom.axisPlacement", "value": "left" }] },
+          { "matcher": { "id": "byName", "options": "Exposure $" }, "properties": [{ "id": "unit", "value": "currencyUSD" }, { "id": "custom.axisPlacement", "value": "right" }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "id": 17,
+      "targets": [
+        { "expr": "polymorph_active_orders_total", "legendFormat": "Active Orders", "refId": "A" },
+        { "expr": "polymorph_total_exposure_usdc", "legendFormat": "Exposure $", "refId": "B" }
+      ]
+    },
+    {
+      "title": "Fees & Rebates",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 20, "lineWidth": 2 },
+          "unit": "currencyUSD"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "id": 18,
+      "targets": [
+        { "expr": "polymorph_rebates_earned_usdc", "legendFormat": "Rebates Earned", "refId": "A" },
+        { "expr": "polymorph_fees_paid_usdc", "legendFormat": "Fees Paid", "refId": "B" },
+        { "expr": "polymorph_rebates_earned_usdc - polymorph_fees_paid_usdc", "legendFormat": "Net Fees", "refId": "C" }
+      ]
+    },
+    {
+      "title": "Internal Latency Breakdown (ns)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 5, "lineWidth": 2 },
+          "unit": "ns"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "id": 19,
+      "targets": [
+        { "expr": "histogram_quantile(0.95, rate(polymorph_internal_tick_to_trade_ns_bucket[5m]))", "legendFormat": "p95 {{phase}}", "refId": "A" },
+        { "expr": "histogram_quantile(0.50, rate(polymorph_risk_check_latency_ns_bucket[5m]))", "legendFormat": "Risk Check p50", "refId": "B" },
+        { "expr": "histogram_quantile(0.50, rate(polymorph_cache_lookup_latency_ns_bucket[5m]))", "legendFormat": "Cache Lookup p50", "refId": "C" }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["polymorph", "hft", "polymarket"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PollyMorph Live Trading",
+  "uid": "polymorph-live",
+  "version": 1
+}

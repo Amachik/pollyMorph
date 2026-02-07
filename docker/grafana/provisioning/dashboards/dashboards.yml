@@ -1,0 +1,14 @@
+# Grafana dashboard provisioning for PollyMorph
+apiVersion: 1
+
+providers:
+  - name: 'PollyMorph'
+    orgId: 1
+    folder: 'PollyMorph'
+    folderUid: 'polymorph'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

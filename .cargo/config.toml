@@ -1,0 +1,26 @@
+# PollyMorph - Target-specific build settings
+# These override rustflags per target platform
+
+# Windows (local dev) - native CPU optimizations
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-cpu=native",
+    "-C", "target-feature=+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt",
+]
+
+# Linux x86 (if deploying to x86 VPS)
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = [
+    "-C", "link-arg=-fuse-ld=mold",
+    "-C", "target-cpu=native",
+    "-C", "target-feature=+avx2,+fma,+bmi1,+bmi2,+lzcnt,+popcnt",
+]
+
+# Oracle Cloud ARM (Ampere Altra / Neoverse N1)
+# Build with: cargo zigbuild --release --target aarch64-unknown-linux-gnu
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=neoverse-n1",
+    "-C", "target-feature=+neon,+aes,+sha2",
+]

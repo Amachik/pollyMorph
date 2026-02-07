@@ -1,0 +1,115 @@
+# PollyMorph HFT Bot - Default Configuration
+# Copy to local.toml and customize for your environment
+
+[polymarket]
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+rest_url = "https://clob.polymarket.com"
+api_key = ""
+api_secret = ""
+private_key = ""  # Your wallet private key (hex, no 0x prefix)
+polygon_rpc = "https://polygon-rpc.com"
+clob_address = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+[exchanges]
+binance_ws = "wss://stream.binance.com:9443/ws"
+coinbase_ws = "wss://ws-feed.exchange.coinbase.com"
+symbols = ["BTCUSDT", "ETHUSDT"]
+
+[trading]
+# Shadow Mode (Paper Trading) - simulate without real execution
+is_shadow_mode = false
+# Shadow mode initial virtual balance in USDC
+shadow_initial_balance = "10000"
+
+# Maximum taker fee in basis points (3.15% = 315 bps for 2026)
+max_taker_fee_bps = 315
+# Expected slippage in basis points
+slippage_bps = 10
+# Estimated gas cost in USD
+gas_cost_usd = "0.05"
+# Minimum profit threshold in basis points
+min_profit_bps = 50
+# Default order size in USDC
+default_order_size = "100"
+# Maximum order size in USDC
+max_order_size = "10000"
+# Maker spread offset (how far below market to place maker orders)
+maker_spread_offset_bps = 5
+# Enable maker mode
+maker_mode_enabled = true
+# Enable taker/arbitrage mode
+taker_mode_enabled = true
+
+# =============================================================================
+# 2026 Dynamic Fee Curve Configuration
+# When probability is in maker_force range, MUST use post_only to avoid 3.15% taker fee
+# =============================================================================
+[trading.fee_curve_2026]
+# Probability range where maker mode is FORCED (to capture rebates, avoid taker fee)
+maker_force_prob_min = "0.40"
+maker_force_prob_max = "0.60"
+# Maker rebate in basis points (negative = rebate)
+maker_rebate_bps = -20
+# Taker fee tiers based on probability distance from 0.5
+taker_fee_at_edge_bps = 200      # prob < 0.15 or > 0.85
+taker_fee_mid_range_bps = 315    # prob 0.40-0.60 (highest fee zone)
+taker_fee_default_bps = 250      # all other ranges
+# Pre-sign cache range (±% from current tick)
+presign_cache_range_pct = "2.0"
+
+# =============================================================================
+# Grid Layering Configuration (Market-Making Ladder)
+# =============================================================================
+[trading.grid]
+# Number of levels per side (buy/sell)
+levels_per_side = 5
+# Size per level in USDC
+size_per_level = "100"
+# Base spacing between levels (0.01 = 1 cent)
+base_spacing = "0.01"
+# Volatility multiplier for dynamic spacing
+volatility_multiplier = "1.0"
+# Maximum total exposure per grid side
+max_grid_exposure = "5000"
+# Minimum aggregate profit BPS for grid
+min_aggregate_profit_bps = 50
+# Auto-rebalance on fill (place counter-order)
+auto_rebalance = true
+# Use batch execution (create_orders endpoint)
+batch_execution = true
+
+[risk]
+# Daily bankroll in USDC
+daily_bankroll = "100000"
+# Kill switch threshold as percentage (5% = lose $5000 on $100k bankroll)
+kill_switch_threshold_pct = "5"
+# Maximum position size per market in USDC
+max_position_per_market = "10000"
+# Maximum total exposure across all markets
+max_total_exposure = "50000"
+# Cooldown period after loss in milliseconds
+loss_cooldown_ms = 60000
+
+# Gap Protection (Emergency Stop-Loss)
+# Triggers cancel_all and halts trading if price gaps more than this % in a single tick
+gap_threshold_pct = "5.0"
+
+# Volatility-Adaptive Spacing
+# Multiplier for grid spacing when volatility spikes >2x baseline
+volatility_spike_threshold = 2.0
+volatility_buffer_multiplier = "1.5"
+
+# Volume Spike Circuit Breaker (Toxic Flow Protection)
+# Triggers halt if 1-second volume exceeds this multiplier of 5-minute average
+# E.g., 10.0 = halt if current second has 10x the average volume (breaking news/toxic flow)
+volume_spike_mult = 10.0
+
+[network]
+# WebSocket ping interval in milliseconds
+ws_ping_interval_ms = 15000
+# Connection timeout in milliseconds
+connection_timeout_ms = 5000
+# Order submission timeout (must be very low for HFT)
+order_timeout_ms = 100
+# Maximum reconnection attempts
+max_reconnect_attempts = 10

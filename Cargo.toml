@@ -1,0 +1,134 @@
+[package]
+name = "polymorph-hft"
+version = "0.1.0"
+edition = "2021"
+authors = ["PollyMorph Team"]
+description = "Low-latency HFT arbitrage and market-making bot for Polymarket"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
+
+# Benchmark profile - same as release but with debug symbols for profiling
+[profile.bench]
+inherits = "release"
+debug = false
+lto = "fat"
+
+[profile.release.build-override]
+opt-level = 3
+
+[dependencies]
+# Async runtime - single-threaded for predictable latency
+tokio = { version = "1.35", features = ["rt", "macros", "sync", "time", "net", "signal"] }
+
+# WebSocket connectivity
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Ultra-fast JSON parsing (SIMD-accelerated)
+simd-json = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Ethereum/Polygon signing (EIP-712)
+ethers = { version = "2.0", features = ["legacy", "rustls"] }
+ethers-core = "2.0"
+alloy-primitives = "0.6"
+alloy-sol-types = "0.6"
+
+# HTTP client for REST APIs
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+
+# High-precision decimals for financial calculations
+rust_decimal = { version = "1.33", features = ["serde"] }
+rust_decimal_macros = "1.33"
+
+# Time handling with nanosecond precision
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Lock-free data structures for hot path
+crossbeam = "0.8"
+parking_lot = "0.12"
+
+# Memory arena for zero-allocation hot path
+bumpalo = "3.14"
+
+# Fast hashing
+ahash = "0.8"
+rustc-hash = "1.1"
+
+# Lock-free concurrent hashmap for signature cache
+dashmap = "5.5"
+
+# High-precision TSC-based timing for latency measurement
+quanta = "0.12"
+
+# CPU core affinity for pinning trading thread (prevents 10-20ms kernel migration spikes)
+core_affinity = "0.8"
+
+# Ultra-fast global allocator (2-3x faster than system allocator)
+mimalloc = { version = "0.1", default-features = false }
+
+# SPSC lock-free queue - faster than mpsc channels (no contention)
+rtrb = "0.3"
+
+# Portable SIMD for batch processing (nightly feature on stable)
+wide = "0.7"
+
+# Compile-time string hashing
+const-fnv1a-hash = "1.1"
+
+# Metrics and monitoring (Prometheus)
+prometheus = { version = "0.13", features = ["process"] }
+lazy_static = "1.4"
+
+# HTTP server for /metrics endpoint
+warp = "0.3"
+
+# Rate limiting
+governor = "0.6"
+
+# Hex encoding
+hex = "0.4"
+
+# HMAC authentication for Polymarket L2 API
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# SmallVec for zero-alloc collections
+smallvec = "1.11"
+
+# Cryptographic randomness for order salt generation
+rand = "0.8"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio-test = "0.4"
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+
+# Target-specific rustflags are in .cargo/config.toml

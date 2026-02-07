@@ -1,0 +1,31 @@
+# Prometheus configuration for PollyMorph Shadow Mode
+# Scrapes metrics from the HFT bot running on the host
+
+global:
+  scrape_interval: 5s      # Fast scrape for HFT metrics
+  evaluation_interval: 5s
+  external_labels:
+    monitor: 'polymorph-shadow'
+
+scrape_configs:
+  # PollyMorph HFT Bot metrics
+  - job_name: 'polymorph'
+    static_configs:
+      - targets: ['host.docker.internal:9091']
+        labels:
+          instance: 'shadow-mode'
+          env: 'local'
+    
+    # Relabel to add useful metadata
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: host.docker.internal:9091
+
+  # Optional: Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

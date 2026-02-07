@@ -1,0 +1,21 @@
+# Secrets
+.env
+config/local.toml
+
+# Build
+/target/
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Data
+*.log
+data/

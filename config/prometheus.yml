@@ -1,0 +1,21 @@
+# Prometheus configuration for PollyMorph LIVE Trading
+# Run locally without Docker:
+#   prometheus.exe --config.file=config/prometheus.yml
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  external_labels:
+    monitor: 'polymorph-live'
+
+scrape_configs:
+  - job_name: 'polymorph'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          instance: 'live'
+          env: 'production'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9091']

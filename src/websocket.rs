@@ -241,7 +241,7 @@ impl PolymarketWs {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            debug!("📩 Raw WS message: {}", &text[..text.len().min(200)]);
+                            info!("📩 Raw WS message: {}", &text[..text.len().min(300)]);
                             self.process_message(&text, &mut json_buffer).await;
                         }
                         Some(Ok(Message::Binary(data))) => {
@@ -304,7 +304,7 @@ impl PolymarketWs {
                 // Determine message type from event_type or msg_type field
                 let event_type = msg.event_type.or(msg.msg_type).unwrap_or("");
                 let has_price_changes = msg.price_changes.is_some();
-                debug!("📦 Parsed msg: event_type='{}', has_price_changes={}", event_type, has_price_changes);
+                info!("📦 Parsed msg: event_type='{}', has_price_changes={}", event_type, has_price_changes);
                 
                 match event_type {
                     "book" => {

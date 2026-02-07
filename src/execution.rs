@@ -77,13 +77,34 @@ impl OrderExecutor {
         token_registry: Arc<TokenIdRegistry>,
     ) -> Self {
         // Configure HTTP client for minimum latency
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(config.network.order_timeout_ms))
             .pool_max_idle_per_host(10)
             .tcp_nodelay(true)
-            .user_agent("polymorph-hft/1.0")
-            .build()
-            .expect("Failed to create HTTP client");
+            .user_agent("polymorph-hft/1.0");
+
+        // SSH tunnel support: if rest_url has a non-standard port (e.g. :8443),
+        // resolve the hostname to localhost so traffic routes through the SSH tunnel.
+        // This bypasses Cloudflare WAF blocking POST requests from datacenter IPs.
+        // Usage: set POLYMARKET_REST_URL=https://clob.polymarket.com:8443
+        //        and run: ssh -R 8443:clob.polymarket.com:443 user@VPS_IP -N
+        {
+            let url = &config.polymarket.rest_url;
+            let after_scheme = url.strip_prefix("https://").unwrap_or(url);
+            if let Some(colon) = after_scheme.find(':') {
+                let host = &after_scheme[..colon];
+                let port_str = &after_scheme[colon + 1..];
+                if let Ok(port) = port_str.parse::<u16>() {
+                    builder = builder.resolve(
+                        host,
+                        std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                    );
+                    info!("SSH tunnel mode: {} -> localhost:{}", host, port);
+                }
+            }
+        }
+
+        let client = builder.build().expect("Failed to create HTTP client");
         
         // Pre-compute address string before moving signer into struct
         let cached_address = format!("0x{}", hex::encode(signer.address().as_slice()));

@@ -1204,10 +1204,13 @@ impl PricingEngine {
             let bid_offset = base_offset * offset_mult;
             let ask_offset = base_offset * offset_mult;
 
+            let tick = Decimal::new(1, 3); // 0.001 minimum tick
             let buy_price = (best_bid - bid_offset - skew_decimal * mid_price)
-                .max(Decimal::new(1, 2));
+                .max(Decimal::new(1, 2))
+                .min(best_ask - tick); // post-only: must be below best ask
             let sell_price = (best_ask + ask_offset - skew_decimal * mid_price)
-                .min(Decimal::new(99, 2));
+                .min(Decimal::new(99, 2))
+                .max(best_bid + tick); // post-only: must be above best bid
 
             // Ensure quotes don't cross
             if buy_price >= sell_price {

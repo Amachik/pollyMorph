@@ -127,7 +127,7 @@ Restart=always
 RestartSec=5
 
 [Install]
-WantedBy=multi-target.target
+WantedBy=multi-user.target
 SVCEOF
 
 # Create PollyMorph systemd service

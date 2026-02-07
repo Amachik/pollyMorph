@@ -392,8 +392,8 @@ impl OrderExecutor {
                 "nonce": order.nonce.to_string(),
                 "feeRateBps": order.fee_rate_bps,
                 "side": match order.side {
-                    Side::Buy => 0u8,
-                    Side::Sell => 1u8,
+                    Side::Buy => "BUY",
+                    Side::Sell => "SELL",
                 },
                 "signatureType": order.signature_type,
                 "signature": signature.to_hex(),
@@ -411,12 +411,6 @@ impl OrderExecutor {
         let body_str = serde_json::to_string(&payload)
             .map_err(|e| ExecutionError::SigningFailed(e.to_string()))?;
 
-        // TEMP DEBUG: log first order payload to diagnose 400 errors
-        use std::sync::atomic::{AtomicBool, Ordering as AtomOrd};
-        static LOGGED_ONCE: AtomicBool = AtomicBool::new(false);
-        if !LOGGED_ONCE.swap(true, AtomOrd::Relaxed) {
-            warn!("DEBUG order payload: {}", body_str);
-        }
 
         let headers = self.l2_headers("POST", path, &body_str)?;
 

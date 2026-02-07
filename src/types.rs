@@ -235,8 +235,8 @@ pub struct PreparedOrder {
     /// Whether this market uses neg-risk contract
     pub neg_risk: bool,
     // --- EIP-712 signed order fields (needed for API payload) ---
-    /// Random salt for order uniqueness (uint256)
-    pub salt: String,
+    /// Random salt for order uniqueness (fits in JSON number)
+    pub salt: u64,
     /// Maker address (the funder / wallet address)
     pub maker: String,
     /// Signer address (the EOA that signs)

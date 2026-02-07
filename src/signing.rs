@@ -330,8 +330,9 @@ impl OrderSigner {
             .unwrap()
             .as_nanos() as u64;
 
-        // Generate random salt (matches Python SDK: random int)
+        // Generate random salt (matches Python SDK: random int that fits in JSON number)
         let salt = Self::generate_salt();
+        let salt_u256 = U256::from(salt);
 
         // Calculate amounts based on side (6-decimal USDC units)
         let (maker_amount_u256, taker_amount_u256) = self.calculate_amounts(side, price, size);
@@ -353,7 +354,7 @@ impl OrderSigner {
 
         // Build the EIP-712 struct hash matching OrderStructs.sol
         let order_hash = self.compute_order_hash(
-            &salt,
+            &salt_u256,
             maker_addr,
             signer_addr,
             taker_addr,
@@ -383,9 +384,9 @@ impl OrderSigner {
             created_at_ns,
             token_id_str,
             neg_risk,
-            salt: salt.to_string(),
-            maker: format!("0x{}", hex::encode(maker_addr.as_slice())),
-            signer_addr: format!("0x{}", hex::encode(signer_addr.as_slice())),
+            salt,
+            maker: maker_addr.to_checksum(None),
+            signer_addr: signer_addr.to_checksum(None),
             taker: ZERO_ADDRESS.to_string(),
             maker_amount: maker_amount_u256.to_string(),
             taker_amount: taker_amount_u256.to_string(),
@@ -440,12 +441,9 @@ impl OrderSigner {
     /// Generate a cryptographically random salt for order uniqueness.
     /// Uses the `rand` crate for proper entropy — two orders in the same nanosecond
     /// will still get different salts.
-    fn generate_salt() -> U256 {
+    fn generate_salt() -> u64 {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let high: u128 = rng.gen();
-        let low: u128 = rng.gen();
-        U256::from(high) << 128 | U256::from(low)
+        rand::thread_rng().gen()
     }
 
     /// Compute the EIP-712 order hash matching OrderStructs.sol exactly.

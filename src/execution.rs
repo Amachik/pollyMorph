@@ -226,7 +226,7 @@ impl OrderExecutor {
                 signal.size,
                 signal.order_type,
                 TimeInForce::GTC,
-                300, // 5 minute expiration
+                0, // no expiration for GTC (matches Python SDK)
                 token_id_str.clone(),
                 neg_risk,
                 fee_rate_bps,

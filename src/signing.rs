@@ -324,7 +324,8 @@ impl OrderSigner {
         neg_risk: bool,
         fee_rate_bps: u32,
     ) -> anyhow::Result<PreparedOrder> {
-        let nonce = self.nonce_generator.next();
+        // Polymarket API expects nonce=0 for new orders (salt provides uniqueness)
+        let nonce: u64 = 0;
         let created_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

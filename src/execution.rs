@@ -411,6 +411,13 @@ impl OrderExecutor {
         let body_str = serde_json::to_string(&payload)
             .map_err(|e| ExecutionError::SigningFailed(e.to_string()))?;
 
+        // TEMP DEBUG: log first order payload to diagnose 400 errors
+        use std::sync::atomic::{AtomicBool, Ordering as AtomOrd};
+        static LOGGED_ONCE: AtomicBool = AtomicBool::new(false);
+        if !LOGGED_ONCE.swap(true, AtomOrd::Relaxed) {
+            warn!("DEBUG order payload: {}", body_str);
+        }
+
         let headers = self.l2_headers("POST", path, &body_str)?;
 
         let mut request = self.client

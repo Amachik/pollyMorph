@@ -432,9 +432,7 @@ impl OrderExecutor {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             if body.contains("Invalid order payload") {
-                error!("Order INVALID: side={:?} token={}... maker_amt={} taker_amt={} sig_type={} post_only={}",
-                    order.side, &token_id_for_api[..20.min(token_id_for_api.len())],
-                    order.maker_amount, order.taker_amount, order.signature_type, order.post_only);
+                error!("FULL PAYLOAD for invalid order:\n{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
             }
             error!("Order submission failed: {} - {}", status, body);
             return Err(ExecutionError::ApiError(format!("{}: {}", status, body)));

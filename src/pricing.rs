@@ -1197,7 +1197,8 @@ impl PricingEngine {
         // Level 2: wider (1.5x offset) — catches bigger moves, better adverse selection protection
         let mut signals = Vec::with_capacity(4);
         let level_offsets = [Decimal::ONE, Decimal::new(2, 0)]; // 1x and 2x base offset
-        let level_sizes = [order_size, order_size / Decimal::TWO]; // Full size, half size at wider level
+        let min_size = Decimal::new(5, 0); // Polymarket minimum order size in tokens
+        let level_sizes = [order_size.max(min_size), (order_size / Decimal::TWO).max(min_size)];
 
         for (level_idx, (&offset_mult, &size)) in level_offsets.iter().zip(level_sizes.iter()).enumerate() {
             let bid_offset = base_offset * offset_mult;

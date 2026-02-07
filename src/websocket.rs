@@ -794,9 +794,11 @@ impl BinanceWs {
                 Err(e) => {
                     let err_str = e.to_string();
                     // Binance geo-blocks US IPs with HTTP 451 — stop retrying
+                    // NOTE: Do NOT return Ok(()) here — that would complete the task and
+                    // trigger select_all shutdown in main. Instead, sleep forever.
                     if err_str.contains("451") {
                         warn!("Binance geo-blocked (HTTP 451) — disabling Binance feed (non-critical)");
-                        return Ok(());
+                        loop { tokio::time::sleep(std::time::Duration::from_secs(86400)).await; }
                     }
                     error!("Binance WebSocket error: {}", err_str);
                     let _ = self.event_tx.send(WsEvent::Error {

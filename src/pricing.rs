@@ -1204,7 +1204,7 @@ impl PricingEngine {
             let bid_offset = base_offset * offset_mult;
             let ask_offset = base_offset * offset_mult;
 
-            let tick = Decimal::new(1, 3); // 0.001 minimum tick
+            let tick = Decimal::new(1, 2); // 0.01 tick to prevent post-only crossing
             let buy_price = (best_bid - bid_offset - skew_decimal * mid_price)
                 .max(Decimal::new(1, 2))
                 .min(best_ask - tick); // post-only: must be below best ask
@@ -1233,15 +1233,17 @@ impl PricingEngine {
                 });
             }
 
-            // SELL side
-            if active + signals.len() < 6
+            // SELL side — only quote if we actually hold tokens to sell
+            let net_pos = self.inventory.net_position(token_id);
+            if net_pos > Decimal::ZERO
+                && active + signals.len() < 6
                 && !self.lifecycle.has_nearby_order(token_id, Side::Sell, sell_price, 10)
             {
                 signals.push(TradeSignal {
                     market_id,
                     side: Side::Sell,
                     price: sell_price,
-                    size,
+                    size: size.min(net_pos), // don't sell more than we own
                     order_type: OrderType::Limit,
                     expected_profit_bps: expected_profit,
                     signal_timestamp_ns: now_ns,

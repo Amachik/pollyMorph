@@ -604,15 +604,16 @@ impl PolymarketUserWs {
         info!("Polymarket User Channel connected, sending auth subscription");
 
         // Subscribe with L2 API key authentication
-        // Format: {"markets": [], "type": "user", "auth": {"apiKey": ..., "secret": ..., "passphrase": ...}}
+        // Format per Polymarket CLOB SDK: {"auth": {...}, "type": "subscribe", "channel": "user", "markets": []}
         let subscribe_msg = serde_json::json!({
-            "markets": [],
-            "type": "user",
             "auth": {
                 "apiKey": self.config.polymarket.api_key,
                 "secret": self.config.polymarket.api_secret,
                 "passphrase": self.config.polymarket.api_passphrase,
-            }
+            },
+            "type": "subscribe",
+            "channel": "user",
+            "markets": [],
         });
         write.send(Message::Text(subscribe_msg.to_string())).await?;
         debug!("Sent user channel subscription with auth");

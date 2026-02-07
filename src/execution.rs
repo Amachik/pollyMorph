@@ -81,6 +81,7 @@ impl OrderExecutor {
             .timeout(std::time::Duration::from_millis(config.network.order_timeout_ms))
             .pool_max_idle_per_host(10)
             .tcp_nodelay(true)
+            .user_agent("polymorph-hft/1.0")
             .build()
             .expect("Failed to create HTTP client");
         

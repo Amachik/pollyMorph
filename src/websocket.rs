@@ -573,11 +573,8 @@ impl PolymarketUserWs {
 
     /// Start the authenticated user channel WebSocket connection
     pub async fn run(self) -> anyhow::Result<()> {
-        // User channel URL: base_ws_url + "/ws/user"
-        let base = self.config.polymarket.ws_url
-            .trim_end_matches("/ws/market")
-            .trim_end_matches('/');
-        let url = format!("{}/ws/user", base);
+        // New Polymarket real-time-data WebSocket endpoint (replaces old /ws/user)
+        let url = "wss://ws-live-data.polymarket.com".to_string();
         info!("Connecting to Polymarket User Channel at {}", url);
 
         loop {
@@ -604,16 +601,18 @@ impl PolymarketUserWs {
         info!("Polymarket User Channel connected, sending auth subscription");
 
         // Subscribe with L2 API key authentication
-        // Format per Polymarket CLOB SDK: {"auth": {...}, "type": "subscribe", "channel": "user", "markets": []}
+        // Format per Polymarket real-time-data-client SDK:
+        // {"subscriptions": [{"topic": "clob_user", "type": "*", "clob_auth": {"key": ..., "secret": ..., "passphrase": ...}}]}
         let subscribe_msg = serde_json::json!({
-            "auth": {
-                "apiKey": self.config.polymarket.api_key,
-                "secret": self.config.polymarket.api_secret,
-                "passphrase": self.config.polymarket.api_passphrase,
-            },
-            "type": "subscribe",
-            "channel": "user",
-            "markets": [],
+            "subscriptions": [{
+                "topic": "clob_user",
+                "type": "*",
+                "clob_auth": {
+                    "key": self.config.polymarket.api_key,
+                    "secret": self.config.polymarket.api_secret,
+                    "passphrase": self.config.polymarket.api_passphrase,
+                }
+            }]
         });
         write.send(Message::Text(subscribe_msg.to_string())).await?;
         debug!("Sent user channel subscription with auth");
@@ -626,7 +625,8 @@ impl PolymarketUserWs {
                 msg = read.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            debug!("User WS msg: {}", &text[..text.len().min(200)]);
+                            // Log first messages at INFO level so we can debug the new API format
+                            info!("User WS msg: {}", &text[..text.len().min(500)]);
                             self.process_user_message(&text, &mut json_buffer).await;
                         }
                         Some(Ok(Message::Binary(data))) => {

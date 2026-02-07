@@ -392,8 +392,8 @@ impl OrderExecutor {
                 "nonce": order.nonce.to_string(),
                 "feeRateBps": order.fee_rate_bps,
                 "side": match order.side {
-                    Side::Buy => "BUY",
-                    Side::Sell => "SELL",
+                    Side::Buy => 0u8,
+                    Side::Sell => 1u8,
                 },
                 "signatureType": order.signature_type,
                 "signature": signature.to_hex(),

@@ -915,6 +915,16 @@ impl OrderLifecycleManager {
         false
     }
 
+    /// Get count of distinct markets with active orders
+    pub fn active_market_count(&self) -> usize {
+        let orders = self.active_orders.read();
+        let mut seen = rustc_hash::FxHashSet::default();
+        for order in orders.values() {
+            seen.insert(order.token_id);
+        }
+        seen.len()
+    }
+
     /// Get all active order IDs
     pub fn active_order_ids(&self) -> Vec<u64> {
         self.active_orders.read().keys().cloned().collect()
@@ -1166,10 +1176,18 @@ impl PricingEngine {
             return Vec::new(); // Dead market, don't waste orders
         }
 
-        // Max active orders: 6 for multi-level quoting (2 levels × 2 sides + buffer)
+        // Max active orders per market: 4 (1 buy + 1 sell per level, single-level)
         let active = self.lifecycle.active_count_for(token_id);
-        if active >= 6 {
+        if active >= 4 {
             return Vec::new();
+        }
+
+        // Market concentration limit: only quote top N markets to avoid spreading capital thin.
+        // Count how many DISTINCT markets have active orders.
+        let total_active_markets = self.lifecycle.active_market_count();
+        let max_markets: usize = 3; // Concentrate on best 3 markets
+        if total_active_markets >= max_markets && active == 0 {
+            return Vec::new(); // Already quoting max markets, don't enter new ones
         }
 
         // === SKEW CALCULATION ===
@@ -1185,70 +1203,69 @@ impl PricingEngine {
         let base_offset = Decimal::new(maker_offset_bps as i64, 4) * mid_price * vol_multiplier;
 
         let market_id = MarketId::new([0u8; 32], token_id);
-        let order_size = self.config.trading.default_order_size;
+        // Dollar-value sizing: convert target USD amount to token count at current price
+        // e.g. $1 target at price $0.50 = 2 tokens, at price $0.05 = 20 tokens
+        let target_usd = self.config.trading.default_order_size; // now treated as USD, not tokens
+        let order_tokens = if mid_price > Decimal::ZERO {
+            (target_usd / mid_price).round_dp(0) // round to whole tokens
+        } else {
+            Decimal::new(5, 0)
+        };
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
         let expected_profit = self.thresholds.expected_profit_bps(spread_bps / 2, true);
 
-        // === MULTI-LEVEL QUOTING ===
-        // Level 1: tight (right at the spread edge) — higher fill probability
-        // Level 2: wider (1.5x offset) — catches bigger moves, better adverse selection protection
-        let mut signals = Vec::with_capacity(4);
-        let level_offsets = [Decimal::ONE, Decimal::new(2, 0)]; // 1x and 2x base offset
+        // === SINGLE-LEVEL QUOTING (Level 2 disabled until capital > $100) ===
+        let mut signals = Vec::with_capacity(2);
         let min_size = Decimal::new(5, 0); // Polymarket minimum order size in tokens
-        let level_sizes = [order_size.max(min_size), (order_size / Decimal::TWO).max(min_size)];
+        let size = order_tokens.max(min_size);
 
-        for (level_idx, (&offset_mult, &size)) in level_offsets.iter().zip(level_sizes.iter()).enumerate() {
-            let bid_offset = base_offset * offset_mult;
-            let ask_offset = base_offset * offset_mult;
-
+        {
             let tick = Decimal::new(1, 2); // 0.01 tick to prevent post-only crossing
-            let buy_price = (best_bid - bid_offset - skew_decimal * mid_price)
+            let buy_price = (best_bid - base_offset - skew_decimal * mid_price)
                 .max(Decimal::new(1, 2))
                 .min(best_ask - tick); // post-only: must be below best ask
-            let sell_price = (best_ask + ask_offset - skew_decimal * mid_price)
+            let sell_price = (best_ask + base_offset - skew_decimal * mid_price)
                 .min(Decimal::new(99, 2))
                 .max(best_bid + tick); // post-only: must be above best bid
 
             // Ensure quotes don't cross
-            if buy_price >= sell_price {
-                continue;
-            }
+            if buy_price < sell_price {
+                // BUY side
+                if active + signals.len() < 4
+                    && !self.lifecycle.has_nearby_order(token_id, Side::Buy, buy_price, 10)
+                {
+                    signals.push(TradeSignal {
+                        market_id,
+                        side: Side::Buy,
+                        price: buy_price,
+                        size,
+                        order_type: OrderType::Limit,
+                        expected_profit_bps: expected_profit,
+                        signal_timestamp_ns: now_ns,
+                        urgency: SignalUrgency::Medium,
+                    });
+                }
 
-            // BUY side
-            if active + signals.len() < 6
-                && !self.lifecycle.has_nearby_order(token_id, Side::Buy, buy_price, 10)
-            {
-                signals.push(TradeSignal {
-                    market_id,
-                    side: Side::Buy,
-                    price: buy_price,
-                    size,
-                    order_type: OrderType::Limit,
-                    expected_profit_bps: expected_profit,
-                    signal_timestamp_ns: now_ns,
-                    urgency: if level_idx == 0 { SignalUrgency::Medium } else { SignalUrgency::Low },
-                });
-            }
-
-            // SELL side — only quote if we actually hold tokens to sell
-            let net_pos = self.inventory.net_position(token_id);
-            if net_pos > Decimal::ZERO
-                && active + signals.len() < 6
-                && !self.lifecycle.has_nearby_order(token_id, Side::Sell, sell_price, 10)
-            {
-                signals.push(TradeSignal {
-                    market_id,
-                    side: Side::Sell,
-                    price: sell_price,
-                    size: size.min(net_pos), // don't sell more than we own
-                    order_type: OrderType::Limit,
-                    expected_profit_bps: expected_profit,
-                    signal_timestamp_ns: now_ns,
-                    urgency: if level_idx == 0 { SignalUrgency::Medium } else { SignalUrgency::Low },
-                });
+                // SELL side — only quote if we actually hold tokens to sell
+                let net_pos = self.inventory.net_position(token_id);
+                if net_pos > Decimal::ZERO
+                    && active + signals.len() < 4
+                    && !self.lifecycle.has_nearby_order(token_id, Side::Sell, sell_price, 10)
+                {
+                    signals.push(TradeSignal {
+                        market_id,
+                        side: Side::Sell,
+                        price: sell_price,
+                        size: size.min(net_pos), // don't sell more than we own
+                        order_type: OrderType::Limit,
+                        expected_profit_bps: expected_profit,
+                        signal_timestamp_ns: now_ns,
+                        urgency: SignalUrgency::Medium,
+                    });
+                }
             }
         }
 

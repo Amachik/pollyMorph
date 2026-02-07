@@ -239,6 +239,17 @@ async fn main() -> anyhow::Result<()> {
                 warn!("⚠️  Could not check USDC.e balance: {} (using default capital limit)", e);
             }
         }
+        // Bootstrap inventory from recent trades (recover positions from previous runs)
+        match executor.bootstrap_positions(&pricing_engine.inventory).await {
+            Ok(n) => {
+                if n > 0 {
+                    info!("📦 Inventory bootstrapped with {} trade records", n);
+                }
+            }
+            Err(e) => {
+                warn!("⚠️  Could not bootstrap positions: {} (starting with empty inventory)", e);
+            }
+        }
     }
     
     // Spawn all async tasks
@@ -685,6 +696,8 @@ async fn run_report_handler(
                         report.filled_size,
                         report.price,
                     );
+                    // Feed risk manager for P&L tracking, exposure limits, and kill switch
+                    risk_manager.record_trade(&report);
                     // Track fill metrics
                     let side_str = match report.side { types::Side::Buy => "buy", types::Side::Sell => "sell" };
                     metrics::FILLS_TOTAL.with_label_values(&[side_str]).inc();

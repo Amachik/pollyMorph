@@ -584,8 +584,8 @@ impl RiskManager {
         let total: i64 = positions.values()
             .map(|p| {
                 (p.size.abs() * p.avg_entry_price * Decimal::new(100, 0))
-                    .to_string()
-                    .parse::<i64>()
+                    .trunc()
+                    .to_i64()
                     .unwrap_or(0)
             })
             .sum();

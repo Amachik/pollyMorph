@@ -920,6 +920,64 @@ impl OrderExecutor {
         Ok(balance)
     }
 
+    /// Fetch open orders and recent trades from Polymarket API to bootstrap inventory.
+    /// Called at startup to recover position state from previous runs.
+    /// Returns the number of positions bootstrapped.
+    pub async fn bootstrap_positions(&self, inventory: &crate::pricing::InventoryTracker) -> Result<usize, ExecutionError> {
+        let base_url = &self.config.polymarket.rest_url;
+        let mut count = 0usize;
+
+        // 1. Fetch recent trades to reconstruct positions
+        let path = "/trades";
+        let body_str = "";
+        let headers = self.l2_headers("GET", path, body_str)?;
+        let url = format!("{}{}", base_url, path);
+
+        let mut request = self.client.get(&url);
+        for (key, value) in &headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        match request.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(trades) = resp.json::<Vec<serde_json::Value>>().await {
+                    for trade in &trades {
+                        let side_str = trade["side"].as_str().unwrap_or("");
+                        let size_str = trade["size"].as_str().unwrap_or("0");
+                        let price_str = trade["price"].as_str().unwrap_or("0");
+                        let asset_id = trade["asset_id"].as_str().unwrap_or("");
+
+                        let side = match side_str {
+                            "BUY" => Side::Buy,
+                            "SELL" => Side::Sell,
+                            _ => continue,
+                        };
+                        let size = Decimal::from_str_exact(size_str).unwrap_or(Decimal::ZERO);
+                        let price = Decimal::from_str_exact(price_str).unwrap_or(Decimal::ZERO);
+
+                        if size > Decimal::ZERO && price > Decimal::ZERO && !asset_id.is_empty() {
+                            let token_id = crate::websocket::hash_asset_id(asset_id);
+                            inventory.record_fill(token_id, side, size, price);
+                            count += 1;
+                        }
+                    }
+                    info!("📦 Bootstrapped {} positions from {} recent trades", 
+                          count, trades.len());
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                warn!("Failed to fetch trades for bootstrap: {} - {}", status, body);
+            }
+            Err(e) => {
+                warn!("Failed to fetch trades for bootstrap: {}", e);
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Get execution metrics
     pub fn get_metrics(&self) -> ExecutionMetrics {
         ExecutionMetrics {

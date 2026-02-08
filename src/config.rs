@@ -262,6 +262,15 @@ impl Config {
         env_fallback!(cfg.polymarket.private_key, "POLYMARKET_PRIVATE_KEY");
         env_fallback!(cfg.polymarket.polygon_rpc, "POLYGON_RPC_URL");
         
+        // REST URL: env var ALWAYS overrides TOML (needed for tunnel mode on VPS)
+        // Unlike credentials, rest_url has a non-empty default in TOML, so the
+        // empty-check fallback won't trigger. Force override here.
+        if let Ok(url) = std::env::var("POLYMARKET_REST_URL") {
+            if !url.is_empty() {
+                cfg.polymarket.rest_url = url;
+            }
+        }
+        
         Ok(cfg)
     }
     

@@ -895,6 +895,15 @@ impl OrderLifecycleManager {
         self.active_orders.read().values().filter(|o| o.token_id == token_id).count()
     }
 
+    /// Get total size committed to active SELL orders for a given token.
+    /// Used to prevent over-selling: available = net_position - committed_sell_size.
+    pub fn committed_sell_size(&self, token_id: u64) -> Decimal {
+        self.active_orders.read().values()
+            .filter(|o| o.token_id == token_id && o.side == Side::Sell)
+            .map(|o| o.size)
+            .sum()
+    }
+
     /// Check if there's already an active order within `max_dist_bps` of `price`
     /// for the given token_id and side. Used for signal deduplication.
     pub fn has_nearby_order(&self, token_id: u64, side: Side, price: Decimal, max_dist_bps: u32) -> bool {

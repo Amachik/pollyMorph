@@ -75,6 +75,11 @@ async fn main() -> anyhow::Result<()> {
     info!("  - Max taker fee: {}bps", config.trading.max_taker_fee_bps);
     info!("  - Kill switch threshold: {}%", config.risk.kill_switch_threshold_pct);
     info!("  - Default order size: ${}", config.trading.default_order_size);
+    info!("  - REST URL: {}", config.polymarket.rest_url);
+    info!("  - API key loaded: {} chars", config.polymarket.api_key.len());
+    info!("  - API secret loaded: {} chars", config.polymarket.api_secret.len());
+    info!("  - API passphrase loaded: {} chars", config.polymarket.api_passphrase.len());
+    info!("  - Private key loaded: {} chars", config.polymarket.private_key.len());
     
     // Initialize runtime parameters (can be modified at runtime)
     let runtime_params = Arc::new(RuntimeParams::new(&config));

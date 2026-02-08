@@ -596,25 +596,34 @@ async fn run_signal_executor(
             continue; // Don't execute real orders in shadow mode
         }
         
+        // Dedup: skip if we already have a nearby order at this price (within 10bps)
+        // This catches signals that were queued before the previous order was registered
+        if pricing_engine.lifecycle.has_nearby_order(
+            signal.market_id.token_id, signal.side, signal.price, 10
+        ) {
+            continue;
+        }
+
+        // Limit active orders per market (max 2: one buy + one sell)
+        if pricing_engine.lifecycle.active_count_for(signal.market_id.token_id) >= 2 {
+            continue;
+        }
+
         // Skip sell signals when we have no inventory for this token
-        // (prevents wasting API calls on markets where we hold nothing)
         // Also cap sell size to available inventory minus already-committed sells
         if signal.side == Side::Sell {
             let pos = pricing_engine.inventory.net_position(signal.market_id.token_id);
             if pos <= Decimal::ZERO {
                 continue;
             }
-            // Check how many tokens are already committed to open sell orders
             let committed_sell = pricing_engine.lifecycle.committed_sell_size(signal.market_id.token_id);
             let available = pos - committed_sell;
             if available <= Decimal::ZERO {
-                continue; // All inventory already committed to pending sell orders
+                continue;
             }
-            // Cap sell size to available inventory
             if signal.size > available {
                 signal.size = available;
             }
-            // Enforce minimum order size (5 tokens on most Polymarket markets)
             if signal.size < Decimal::new(5, 0) {
                 continue;
             }

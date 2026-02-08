@@ -562,6 +562,7 @@ async fn run_signal_executor(
     mut signal_rx: mpsc::Receiver<TradeSignal>,
 ) {
     info!("Signal executor started");
+    let mut last_capital_warn = std::time::Instant::now() - std::time::Duration::from_secs(60);
     
     while let Some(signal) = signal_rx.recv().await {
         // Skip if trading disabled
@@ -583,6 +584,15 @@ async fn run_signal_executor(
                 );
             }
             continue; // Don't execute real orders in shadow mode
+        }
+        
+        // Skip sell signals when we have no inventory for this token
+        // (prevents wasting API calls on markets where we hold nothing)
+        if signal.side == Side::Sell {
+            let pos = pricing_engine.inventory.net_position(signal.market_id.token_id);
+            if pos <= Decimal::ZERO {
+                continue;
+            }
         }
         
         // Route based on urgency and mode (live trading only)
@@ -635,9 +645,14 @@ async fn run_signal_executor(
                                 metrics::ORDERS_RATE_LIMITED.inc();
                             } else {
                                 metrics::ORDERS_SUBMITTED.with_label_values(&["failed"]).inc();
-                                // Truncate long error messages (e.g. HTML from Cloudflare 403)
                                 let msg = format!("{}", e);
-                                if msg.len() > 120 {
+                                // Throttle capital limit spam to once per 30s
+                                if msg.contains("Capital limit") {
+                                    if last_capital_warn.elapsed() > std::time::Duration::from_secs(30) {
+                                        warn!("Maker order failed: {} (suppressing for 30s)", msg);
+                                        last_capital_warn = std::time::Instant::now();
+                                    }
+                                } else if msg.len() > 120 {
                                     warn!("Maker order failed: {}...", &msg[..120]);
                                 } else {
                                     warn!("Maker order failed: {}", msg);

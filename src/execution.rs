@@ -922,6 +922,12 @@ impl OrderExecutor {
     pub async fn bootstrap_positions(&self, inventory: &crate::pricing::InventoryTracker) -> Result<usize, ExecutionError> {
         let mut count = 0usize;
 
+        // Use a separate client with longer timeout for bootstrap (not HFT-critical)
+        let bootstrap_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| self.client.clone());
+
         // 1. Try data-api /positions endpoint (gives current token holdings directly)
         let signer_addr = &self.cached_address;
         let positions_url = format!(
@@ -930,10 +936,19 @@ impl OrderExecutor {
         );
         info!("📦 Bootstrap: querying positions for {}", signer_addr);
 
-        match self.client.get(&positions_url).send().await {
+        match bootstrap_client.get(&positions_url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<Vec<serde_json::Value>>().await {
-                    Ok(positions) => {
+                // Response could be array or object — parse as Value first
+                match resp.json::<serde_json::Value>().await {
+                    Ok(val) => {
+                        let positions = if let Some(arr) = val.as_array() {
+                            arr.clone()
+                        } else if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+                            arr.clone()
+                        } else {
+                            warn!("📦 Data-API unexpected format: {}", &val.to_string()[..val.to_string().len().min(300)]);
+                            vec![]
+                        };
                         info!("📦 Data-API returned {} position entries", positions.len());
                         for pos in &positions {
                             let asset_id = pos["asset"].as_str().unwrap_or("");
@@ -964,9 +979,9 @@ impl OrderExecutor {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                warn!("📦 Data-API positions request failed: {} - {}", status, &body[..body.len().min(200)]);
+                warn!("📦 Data-API positions failed: {} - {}", status, &body[..body.len().min(200)]);
             }
-            Err(e) => warn!("📦 Data-API positions request error: {}", e),
+            Err(e) => warn!("📦 Data-API positions error: {}", e),
         }
 
         // 2. Fallback: try CLOB /trades endpoint with L2 auth
@@ -976,15 +991,24 @@ impl OrderExecutor {
         let headers = self.l2_headers("GET", path, body_str)?;
         let url = format!("{}{}", base_url, path);
 
-        let mut request = self.client.get(&url);
+        let mut request = bootstrap_client.get(&url);
         for (key, value) in &headers {
             request = request.header(key.as_str(), value.as_str());
         }
 
         match request.send().await {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<Vec<serde_json::Value>>().await {
-                    Ok(trades) => {
+                // Response can be array or {"data": [...]} — parse as Value first
+                match resp.json::<serde_json::Value>().await {
+                    Ok(val) => {
+                        let trades = if let Some(arr) = val.as_array() {
+                            arr.clone()
+                        } else if let Some(arr) = val.get("data").and_then(|d| d.as_array()) {
+                            arr.clone()
+                        } else {
+                            warn!("📦 CLOB /trades unexpected format: {}", &val.to_string()[..val.to_string().len().min(300)]);
+                            vec![]
+                        };
                         info!("📦 CLOB /trades returned {} entries", trades.len());
                         for trade in &trades {
                             let side_str = trade["side"].as_str().unwrap_or("");
@@ -1003,12 +1027,14 @@ impl OrderExecutor {
                             if size > Decimal::ZERO && price > Decimal::ZERO && !asset_id.is_empty() {
                                 let token_id = crate::websocket::hash_asset_id(asset_id);
                                 inventory.record_fill(token_id, side, size, price);
+                                info!("  📌 Trade: {} {} @ ${} (asset: {}...)",
+                                      side_str, size, price, &asset_id[..asset_id.len().min(20)]);
                                 count += 1;
                             }
                         }
                         info!("📦 Bootstrapped {} positions from {} CLOB trades", count, trades.len());
                     }
-                    Err(e) => warn!("📦 Failed to parse trades: {}", e),
+                    Err(e) => warn!("📦 Failed to parse trades response: {}", e),
                 }
             }
             Ok(resp) => {

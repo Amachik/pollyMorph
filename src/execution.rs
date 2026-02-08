@@ -1038,33 +1038,51 @@ impl OrderExecutor {
     /// Must be called after setting on-chain approvals so the CLOB knows about them.
     /// Uses GET with query params per official Python SDK: /balance-allowance/update?asset_type=X&signature_type=0
     /// HMAC signs only the base path (no query params), matching py-clob-client behavior.
-    pub async fn update_clob_balance_allowance(&self) -> Result<(), ExecutionError> {
+    /// For CONDITIONAL tokens, must pass each token_id individually (ERC-1155 requirement).
+    pub async fn update_clob_balance_allowance(&self, conditional_token_ids: &[String]) -> Result<(), ExecutionError> {
         let base_path = "/balance-allowance/update";
 
-        for asset_type in &["CONDITIONAL", "COLLATERAL"] {
-            // Sign with base path only (no query params) — matches Python SDK
+        // 1. Update COLLATERAL (USDC) — no token_id needed
+        {
             let headers = self.l2_headers("GET", base_path, "")?;
-            // But send request with query params in URL
-            let url = format!("{}{}?asset_type={}&signature_type=0", self.config.polymarket.rest_url, base_path, asset_type);
-
+            let url = format!("{}{}?asset_type=COLLATERAL&signature_type=0", self.config.polymarket.rest_url, base_path);
             let mut request = self.client.get(&url);
             for (key, value) in &headers {
                 request = request.header(key.as_str(), value.as_str());
             }
-
             match request.send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    if status.is_success() {
-                        info!("✅ CLOB balance/allowance updated for {} tokens", asset_type);
-                    } else {
-                        warn!("⚠️  CLOB balance-allowance/update ({}): {} - {}", asset_type, status, &text[..text.len().min(200)]);
-                    }
+                Ok(resp) if resp.status().is_success() => {
+                    info!("✅ CLOB balance/allowance updated for COLLATERAL");
                 }
-                Err(e) => warn!("⚠️  CLOB balance-allowance/update ({}) failed: {}", asset_type, e),
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    warn!("⚠️  CLOB balance-allowance/update (COLLATERAL): {}", &text[..text.len().min(200)]);
+                }
+                Err(e) => warn!("⚠️  CLOB balance-allowance/update (COLLATERAL) failed: {}", e),
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        // 2. Update CONDITIONAL — one call per token_id (ERC-1155)
+        for token_id in conditional_token_ids {
+            let headers = self.l2_headers("GET", base_path, "")?;
+            let url = format!("{}{}?asset_type=CONDITIONAL&token_id={}&signature_type=0",
+                self.config.polymarket.rest_url, base_path, token_id);
+            let mut request = self.client.get(&url);
+            for (key, value) in &headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
+            match request.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("✅ CLOB allowance updated for token {}...{}", &token_id[..token_id.len().min(8)], &token_id[token_id.len().saturating_sub(6)..]);
+                }
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    warn!("⚠️  CLOB allowance update (token {}): {}", &token_id[..token_id.len().min(12)], &text[..text.len().min(200)]);
+                }
+                Err(e) => warn!("⚠️  CLOB allowance update failed: {}", e),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
         Ok(())
@@ -1119,8 +1137,9 @@ impl OrderExecutor {
     /// Fetch positions from Polymarket APIs to bootstrap inventory.
     /// Tries two sources: (1) data-api /positions (current holdings), (2) CLOB /trades (fallback).
     /// Returns the number of positions bootstrapped.
-    pub async fn bootstrap_positions(&self, inventory: &crate::pricing::InventoryTracker) -> Result<usize, ExecutionError> {
+    pub async fn bootstrap_positions(&self, inventory: &crate::pricing::InventoryTracker) -> Result<(usize, Vec<String>), ExecutionError> {
         let mut count = 0usize;
+        let mut asset_ids = Vec::new();
 
         // Use a separate client with longer timeout for bootstrap (not HFT-critical)
         let bootstrap_client = reqwest::Client::builder()
@@ -1162,6 +1181,7 @@ impl OrderExecutor {
                                 let price_dec = Decimal::from_str_exact(&format!("{:.4}", avg_price))
                                     .unwrap_or(Decimal::ZERO);
                                 inventory.record_fill(token_id, Side::Buy, size_dec, price_dec);
+                                asset_ids.push(asset_id.to_string());
                                 info!("  📌 Position: {} tokens @ ${:.4} (asset: {}...)",
                                       size, avg_price, &asset_id[..asset_id.len().min(20)]);
                                 count += 1;
@@ -1169,7 +1189,7 @@ impl OrderExecutor {
                         }
                         if count > 0 {
                             info!("📦 Bootstrapped {} positions from data-api", count);
-                            return Ok(count);
+                            return Ok((count, asset_ids));
                         }
                         info!("📦 Data-API returned no open positions for this address");
                     }
@@ -1227,6 +1247,9 @@ impl OrderExecutor {
                             if size > Decimal::ZERO && price > Decimal::ZERO && !asset_id.is_empty() {
                                 let token_id = crate::websocket::hash_asset_id(asset_id);
                                 inventory.record_fill(token_id, side, size, price);
+                                if side == Side::Buy {
+                                    asset_ids.push(asset_id.to_string());
+                                }
                                 info!("  📌 Trade: {} {} @ ${} (asset: {}...)",
                                       side_str, size, price, &asset_id[..asset_id.len().min(20)]);
                                 count += 1;
@@ -1247,7 +1270,7 @@ impl OrderExecutor {
             }
         }
 
-        Ok(count)
+        Ok((count, asset_ids))
     }
 
     /// Get execution metrics

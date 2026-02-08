@@ -249,21 +249,23 @@ async fn main() -> anyhow::Result<()> {
             Ok(()) => info!("🔓 Token approvals verified"),
             Err(e) => warn!("⚠️  Token approval check failed: {} (sells may fail)", e),
         }
-        // Notify CLOB about on-chain balance/allowances
-        match executor.update_clob_balance_allowance().await {
-            Ok(()) => {}
-            Err(e) => warn!("⚠️  CLOB balance sync failed: {}", e),
-        }
         // Bootstrap inventory from recent trades (recover positions from previous runs)
+        let mut bootstrapped_asset_ids = Vec::new();
         match executor.bootstrap_positions(&pricing_engine.inventory).await {
-            Ok(n) => {
+            Ok((n, asset_ids)) => {
                 if n > 0 {
-                    info!("📦 Inventory bootstrapped with {} trade records", n);
+                    info!("📦 Inventory bootstrapped with {} trade records ({} token IDs)", n, asset_ids.len());
                 }
+                bootstrapped_asset_ids = asset_ids;
             }
             Err(e) => {
                 warn!("⚠️  Could not bootstrap positions: {} (starting with empty inventory)", e);
             }
+        }
+        // Notify CLOB about on-chain balance/allowances (after bootstrap so we have token IDs)
+        match executor.update_clob_balance_allowance(&bootstrapped_asset_ids).await {
+            Ok(()) => {}
+            Err(e) => warn!("⚠️  CLOB balance sync failed: {}", e),
         }
     }
     

@@ -1036,52 +1036,33 @@ impl OrderExecutor {
 
     /// Notify the CLOB server to refresh its view of on-chain token allowances.
     /// Must be called after setting on-chain approvals so the CLOB knows about them.
+    /// Uses GET with query params per official Python SDK: /balance-allowance/update?asset_type=X&signature_type=0
     pub async fn update_clob_balance_allowance(&self) -> Result<(), ExecutionError> {
-        // Update for conditional tokens (needed for sells)
-        let path = "/update-balance-allowance";
-        let body = serde_json::json!({
-            "asset_type": "CONDITIONAL"
-        });
-        let body_str = serde_json::to_string(&body)
-            .map_err(|e| ExecutionError::SigningFailed(e.to_string()))?;
+        let base_path = "/balance-allowance/update";
 
-        let headers = self.l2_headers("POST", path, &body_str)?;
-        let url = format!("{}{}", self.config.polymarket.rest_url, path);
+        for asset_type in &["CONDITIONAL", "COLLATERAL"] {
+            let path_with_params = format!("{}?asset_type={}&signature_type=0", base_path, asset_type);
+            let headers = self.l2_headers("GET", &path_with_params, "")?;
+            let url = format!("{}{}", self.config.polymarket.rest_url, path_with_params);
 
-        let mut request = self.client
-            .post(&url)
-            .header("Content-Type", "application/json");
+            let mut request = self.client.get(&url);
+            for (key, value) in &headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
 
-        for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
-        }
-
-        match request.body(body_str).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                if status.is_success() {
-                    info!("✅ CLOB balance/allowance updated for conditional tokens");
-                } else {
-                    warn!("⚠️  CLOB update-balance-allowance: {} - {}", status, &text[..text.len().min(200)]);
+            match request.send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if status.is_success() {
+                        info!("✅ CLOB balance/allowance updated for {} tokens", asset_type);
+                    } else {
+                        warn!("⚠️  CLOB balance-allowance/update ({}): {} - {}", asset_type, status, &text[..text.len().min(200)]);
+                    }
                 }
+                Err(e) => warn!("⚠️  CLOB balance-allowance/update ({}) failed: {}", asset_type, e),
             }
-            Err(e) => warn!("⚠️  CLOB update-balance-allowance failed: {}", e),
-        }
-
-        // Also update for collateral (USDC)
-        let body2 = serde_json::json!({ "asset_type": "COLLATERAL" });
-        let body_str2 = serde_json::to_string(&body2).unwrap();
-        let headers2 = self.l2_headers("POST", path, &body_str2)?;
-        let url2 = format!("{}{}", self.config.polymarket.rest_url, path);
-        let mut req2 = self.client.post(&url2).header("Content-Type", "application/json");
-        for (key, value) in &headers2 {
-            req2 = req2.header(key.as_str(), value.as_str());
-        }
-        if let Ok(resp) = req2.body(body_str2).send().await {
-            if resp.status().is_success() {
-                info!("✅ CLOB balance/allowance updated for collateral (USDC)");
-            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
         Ok(())

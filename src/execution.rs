@@ -500,14 +500,18 @@ impl OrderExecutor {
             let body = response.text().await.unwrap_or_default();
             // Truncate HTML error pages to avoid log flooding
             let body_preview = if body.len() > 200 { &body[..200] } else { &body };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             if status.as_u16() == 403 {
                 // Cloudflare rate limit — back off for 10 seconds
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
                 self.api_backoff_until.store(now + 10, AtomicOrdering::Relaxed);
                 warn!("⏸️  403 from Cloudflare — backing off 10s");
+            } else if body.contains("not enough balance") || body.contains("allowance") {
+                // Balance/allowance issue — back off 30s (won't fix itself without on-chain action)
+                self.api_backoff_until.store(now + 30, AtomicOrdering::Relaxed);
+                error!("Order submission failed: {} - {} (backing off 30s)", status, body_preview);
             } else {
                 error!("Order submission failed: {} - {}", status, body_preview);
             }

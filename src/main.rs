@@ -635,7 +635,13 @@ async fn run_signal_executor(
                                 metrics::ORDERS_RATE_LIMITED.inc();
                             } else {
                                 metrics::ORDERS_SUBMITTED.with_label_values(&["failed"]).inc();
-                                warn!("Maker order failed: {}", e);
+                                // Truncate long error messages (e.g. HTML from Cloudflare 403)
+                                let msg = format!("{}", e);
+                                if msg.len() > 120 {
+                                    warn!("Maker order failed: {}...", &msg[..120]);
+                                } else {
+                                    warn!("Maker order failed: {}", msg);
+                                }
                             }
                         }
                     }

@@ -63,6 +63,8 @@ pub struct OrderExecutor {
     committed_capital_micro: AtomicU64,
     /// Maximum USDC to commit to open orders (in micro-USDC)
     max_capital_micro: AtomicU64,
+    /// Backoff until timestamp (epoch secs) after 403 from Cloudflare
+    api_backoff_until: AtomicU64,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +146,7 @@ impl OrderExecutor {
             cached_address,
             committed_capital_micro: AtomicU64::new(0),
             max_capital_micro: AtomicU64::new(default_max_capital),
+            api_backoff_until: AtomicU64::new(0),
         }
     }
     
@@ -163,6 +166,16 @@ impl OrderExecutor {
         // ================================================================
         if unlikely(!self.risk_manager.is_trading_allowed()) {
             return Err(ExecutionError::KillSwitchActive);
+        }
+        
+        // Check Cloudflare backoff — skip API calls during cooldown
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let backoff_until = self.api_backoff_until.load(AtomicOrdering::Relaxed);
+        if now_secs < backoff_until {
+            return Err(ExecutionError::RateLimited);
         }
         
         // 1. Full risk check with TSC timing
@@ -464,8 +477,20 @@ impl OrderExecutor {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Order submission failed: {} - {}", status, body);
-            return Err(ExecutionError::ApiError(format!("{}: {}", status, body)));
+            // Truncate HTML error pages to avoid log flooding
+            let body_preview = if body.len() > 200 { &body[..200] } else { &body };
+            if status.as_u16() == 403 {
+                // Cloudflare rate limit — back off for 10 seconds
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.api_backoff_until.store(now + 10, AtomicOrdering::Relaxed);
+                warn!("⏸️  403 from Cloudflare — backing off 10s");
+            } else {
+                error!("Order submission failed: {} - {}", status, body_preview);
+            }
+            return Err(ExecutionError::ApiError(format!("{}: {}", status, body_preview)));
         }
 
         let result: serde_json::Value = response.json().await

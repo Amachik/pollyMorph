@@ -757,8 +757,8 @@ async fn run_metrics_reporter(
         // Update Prometheus gauges
         let daily_pnl = risk_metrics.daily_pnl.to_f64().unwrap_or(0.0);
         let exposure = risk_metrics.total_exposure.to_f64().unwrap_or(0.0);
-        let initial_bankroll = config.risk.daily_bankroll.to_f64().unwrap_or(22.0);
-        let wallet = initial_bankroll + daily_pnl;
+        // Use actual on-chain capital limit (not config bankroll assumption)
+        let wallet = executor.max_capital_usdc() + daily_pnl;
 
         metrics::update_health_metrics(
             wallet,

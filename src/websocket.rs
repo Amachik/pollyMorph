@@ -322,13 +322,36 @@ impl PolymarketWs {
                         }
                     }
                     "price_change" => {
-                        // Price change events only have best_bid/best_ask with NO depth info.
-                        // Do NOT synthesize fake BookUpdate snapshots — they create phantom
-                        // liquidity (hardcoded size=100) that tricks the pricing engine into
-                        // placing orders in illiquid markets.
-                        // Only emit Trade events for flow/volume tracking.
+                        // Price change events have best_bid/best_ask but NO depth info.
+                        // We emit a BookUpdate with size=1 (honest minimum) so the pricing
+                        // engine gets price updates. The old code used size=100 which faked
+                        // liquidity — size=1 is truthful and the pricing engine only reads
+                        // best_bid/best_ask prices, not depth.
                         if let Some(price_changes) = &msg.price_changes {
                             for pc in price_changes {
+                                // Emit BookUpdate with honest size for pricing engine
+                                let best_bid = pc.best_bid.as_ref().and_then(|s| Decimal::from_str(s).ok());
+                                let best_ask = pc.best_ask.as_ref().and_then(|s| Decimal::from_str(s).ok());
+                                
+                                if let (Some(bid), Some(ask)) = (best_bid, best_ask) {
+                                    if bid > Decimal::ZERO && ask > bid {
+                                        let token_id = hash_asset_id(&pc.asset_id);
+                                        let mut snapshot = OrderBookSnapshot::default();
+                                        snapshot.token_id = token_id;
+                                        snapshot.timestamp_ns = timestamp_ns;
+                                        snapshot.bid_count = 1;
+                                        snapshot.ask_count = 1;
+                                        snapshot.bids[0] = PriceLevel::new(bid, Decimal::ONE, 1);
+                                        snapshot.asks[0] = PriceLevel::new(ask, Decimal::ONE, 1);
+                                        
+                                        let _ = self.event_tx.send(WsEvent::BookUpdate {
+                                            market_id: pc.asset_id.clone(),
+                                            snapshot,
+                                        }).await;
+                                    }
+                                }
+                                
+                                // Also emit Trade event for flow/volume tracking
                                 if let Ok(price) = Decimal::from_str(&pc.price) {
                                     let size = pc.size.as_ref()
                                         .and_then(|s| Decimal::from_str(s).ok())

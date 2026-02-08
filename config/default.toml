@@ -2,7 +2,7 @@
 # Copy to local.toml and customize for your environment
 
 [polymarket]
-ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 rest_url = "https://clob.polymarket.com"
 api_key = ""
 api_secret = ""

@@ -939,7 +939,12 @@ impl OrderExecutor {
                 .map_err(|e| ExecutionError::SigningFailed(format!("Bad adapter addr: {}", e)))?),
         ];
 
-        for (name, operator) in &operators {
+        for (i, (name, operator)) in operators.iter().enumerate() {
+            // Rate limit: wait 3s between RPC calls (free endpoints throttle aggressively)
+            if i > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+
             // Check isApprovedForAll(owner, operator) — selector 0xe985e9c5
             let check_data = ethers::abi::encode(&[
                 Token::Address(owner),
@@ -952,8 +957,13 @@ impl OrderExecutor {
                 .to(ctf_addr)
                 .data(check_call);
 
-            let result = provider.call(&tx.into(), None).await
-                .map_err(|e| ExecutionError::NetworkError(format!("isApprovedForAll: {}", e)))?;
+            let result = match provider.call(&tx.into(), None).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("⚠️  Could not check approval for {}: {} (will retry next restart)", name, e);
+                    continue;
+                }
+            };
 
             // Decode bool result (last byte of 32-byte word)
             let is_approved = result.len() >= 32 && result[31] == 1;
@@ -984,6 +994,9 @@ impl OrderExecutor {
                     .data(approve_call)
                     .gas(100_000u64) // setApprovalForAll is cheap
                     .chain_id(chain_id);
+
+                // Wait a bit before sending tx to avoid nonce issues after RPC rate limit
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
                 let send_result = client.send_transaction(tx, None).await;
                 match send_result {

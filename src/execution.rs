@@ -1040,7 +1040,7 @@ impl OrderExecutor {
         // Update for conditional tokens (needed for sells)
         let path = "/update-balance-allowance";
         let body = serde_json::json!({
-            "asset_type": 1  // CONDITIONAL = 1
+            "asset_type": "CONDITIONAL"
         });
         let body_str = serde_json::to_string(&body)
             .map_err(|e| ExecutionError::SigningFailed(e.to_string()))?;
@@ -1070,7 +1070,7 @@ impl OrderExecutor {
         }
 
         // Also update for collateral (USDC)
-        let body2 = serde_json::json!({ "asset_type": 0 });
+        let body2 = serde_json::json!({ "asset_type": "COLLATERAL" });
         let body_str2 = serde_json::to_string(&body2).unwrap();
         let headers2 = self.l2_headers("POST", path, &body_str2)?;
         let url2 = format!("{}{}", self.config.polymarket.rest_url, path);

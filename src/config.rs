@@ -240,7 +240,29 @@ impl Config {
             .add_source(config::Environment::with_prefix("POLYMORPH").separator("__"))
             .build()?;
         
-        Ok(config.try_deserialize()?)
+        let mut cfg: Self = config.try_deserialize()?;
+        
+        // Override empty credentials with direct env vars (backwards compatibility).
+        // The config crate expects POLYMORPH__POLYMARKET__PRIVATE_KEY format, but
+        // existing VPS deployments use POLYMARKET_PRIVATE_KEY directly.
+        macro_rules! env_fallback {
+            ($field:expr, $var:expr) => {
+                if $field.is_empty() {
+                    if let Ok(val) = std::env::var($var) {
+                        if !val.is_empty() {
+                            $field = val;
+                        }
+                    }
+                }
+            };
+        }
+        env_fallback!(cfg.polymarket.api_key, "POLYMARKET_API_KEY");
+        env_fallback!(cfg.polymarket.api_secret, "POLYMARKET_API_SECRET");
+        env_fallback!(cfg.polymarket.api_passphrase, "POLYMARKET_API_PASSPHRASE");
+        env_fallback!(cfg.polymarket.private_key, "POLYMARKET_PRIVATE_KEY");
+        env_fallback!(cfg.polymarket.polygon_rpc, "POLYGON_RPC_URL");
+        
+        Ok(cfg)
     }
     
     /// Load with defaults for development/testing

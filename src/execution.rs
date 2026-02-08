@@ -1037,13 +1037,15 @@ impl OrderExecutor {
     /// Notify the CLOB server to refresh its view of on-chain token allowances.
     /// Must be called after setting on-chain approvals so the CLOB knows about them.
     /// Uses GET with query params per official Python SDK: /balance-allowance/update?asset_type=X&signature_type=0
+    /// HMAC signs only the base path (no query params), matching py-clob-client behavior.
     pub async fn update_clob_balance_allowance(&self) -> Result<(), ExecutionError> {
         let base_path = "/balance-allowance/update";
 
         for asset_type in &["CONDITIONAL", "COLLATERAL"] {
-            let path_with_params = format!("{}?asset_type={}&signature_type=0", base_path, asset_type);
-            let headers = self.l2_headers("GET", &path_with_params, "")?;
-            let url = format!("{}{}", self.config.polymarket.rest_url, path_with_params);
+            // Sign with base path only (no query params) — matches Python SDK
+            let headers = self.l2_headers("GET", base_path, "")?;
+            // But send request with query params in URL
+            let url = format!("{}{}?asset_type={}&signature_type=0", self.config.polymarket.rest_url, base_path, asset_type);
 
             let mut request = self.client.get(&url);
             for (key, value) in &headers {

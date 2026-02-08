@@ -464,12 +464,10 @@ impl OrderExecutor {
             "postOnly": order.post_only,
         });
 
-        // Diagnostic: log sell order details to debug "not enough balance / allowance"
+        // Diagnostic: log full payload for sell orders to debug "not enough balance / allowance"
         if order.side == Side::Sell {
-            info!("🔍 SELL order: token={} (len={}), size={}, price={}, maker_amt={}, taker_amt={}, neg_risk={}, sig_type={}",
-                  token_id_for_api, token_id_for_api.len(),
-                  order.size, order.price, order.maker_amount, order.taker_amount,
-                  order.neg_risk, order.signature_type);
+            let debug_payload = serde_json::to_string_pretty(&payload).unwrap_or_default();
+            info!("🔍 SELL payload:\n{}", debug_payload);
         }
 
         let path = "/order";

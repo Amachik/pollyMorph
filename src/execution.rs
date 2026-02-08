@@ -466,10 +466,10 @@ impl OrderExecutor {
 
         // Diagnostic: log sell order details to debug "not enough balance / allowance"
         if order.side == Side::Sell {
-            info!("🔍 SELL order: token={}, size={}, price={}, maker_amt={}, taker_amt={}, neg_risk={}",
-                  &token_id_for_api[..token_id_for_api.len().min(30)],
+            info!("🔍 SELL order: token={} (len={}), size={}, price={}, maker_amt={}, taker_amt={}, neg_risk={}, sig_type={}",
+                  token_id_for_api, token_id_for_api.len(),
                   order.size, order.price, order.maker_amount, order.taker_amount,
-                  order.neg_risk);
+                  order.neg_risk, order.signature_type);
         }
 
         let path = "/order";

@@ -104,13 +104,20 @@ impl OrderExecutor {
         let timeout_ms = if tunnel_mode.is_some() { 2000 } else { config.network.order_timeout_ms };
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(timeout_ms))
+            // HTTP/2 via ALPN — Cloudflare serves h2 much faster than HTTP/1.1
+            // Falls back to HTTP/1.1 if server doesn't support h2
+            .http2_adaptive_window(true)
+            // Connection pooling — keep connections alive to skip TCP+TLS handshake
             .pool_max_idle_per_host(10)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .tcp_nodelay(true)
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .default_headers({
                 let mut h = reqwest::header::HeaderMap::new();
                 h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
                 h.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+                h.insert(reqwest::header::CONNECTION, "keep-alive".parse().unwrap());
                 h
             });
 

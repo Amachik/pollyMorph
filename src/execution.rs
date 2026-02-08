@@ -457,6 +457,14 @@ impl OrderExecutor {
             "postOnly": order.post_only,
         });
 
+        // Diagnostic: log sell order details to debug "not enough balance / allowance"
+        if order.side == Side::Sell {
+            info!("🔍 SELL order: token={}, size={}, price={}, maker_amt={}, taker_amt={}, neg_risk={}",
+                  &token_id_for_api[..token_id_for_api.len().min(30)],
+                  order.size, order.price, order.maker_amount, order.taker_amount,
+                  order.neg_risk);
+        }
+
         let path = "/order";
         let url = format!("{}{}", self.config.polymarket.rest_url, path);
         // Use compact JSON serialization (no spaces) to match Python SDK's separators=(',', ':')
@@ -899,6 +907,160 @@ impl OrderExecutor {
         }
 
         Ok(allowance)
+    }
+
+    /// Check and set conditional token (CTF) approvals for both exchange contracts.
+    /// Required for SELL orders — the exchange needs permission to transfer your tokens.
+    /// Calls `setApprovalForAll` on the CTF ERC-1155 contract for each exchange.
+    pub async fn ensure_token_approvals(&self) -> Result<(), ExecutionError> {
+        use ethers::prelude::*;
+        use ethers::abi::Token;
+
+        let rpc_url = &self.config.polymarket.polygon_rpc;
+        let provider = Provider::<Http>::try_from(rpc_url.as_str())
+            .map_err(|e| ExecutionError::NetworkError(format!("RPC provider: {}", e)))?;
+
+        // CTF (Conditional Token Framework) contract on Polygon
+        let ctf_addr: Address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+            .parse()
+            .map_err(|e| ExecutionError::SigningFailed(format!("Bad CTF addr: {}", e)))?;
+
+        let owner_addr = self.signer.address();
+        let owner: Address = Address::from_slice(owner_addr.as_slice());
+
+        // Exchange contracts that need approval
+        let operators: Vec<(&str, Address)> = vec![
+            ("CTF Exchange", self.config.polymarket.clob_address.parse()
+                .map_err(|e| ExecutionError::SigningFailed(format!("Bad clob addr: {}", e)))?),
+            ("NegRisk Exchange", self.config.polymarket.neg_risk_clob_address.parse()
+                .map_err(|e| ExecutionError::SigningFailed(format!("Bad neg_risk addr: {}", e)))?),
+            // NegRisk Adapter — required for neg_risk market sells
+            ("NegRisk Adapter", "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296".parse()
+                .map_err(|e| ExecutionError::SigningFailed(format!("Bad adapter addr: {}", e)))?),
+        ];
+
+        for (name, operator) in &operators {
+            // Check isApprovedForAll(owner, operator) — selector 0xe985e9c5
+            let check_data = ethers::abi::encode(&[
+                Token::Address(owner),
+                Token::Address(*operator),
+            ]);
+            let mut check_call = vec![0xe9, 0x85, 0xe9, 0xc5];
+            check_call.extend_from_slice(&check_data);
+
+            let tx = TransactionRequest::new()
+                .to(ctf_addr)
+                .data(check_call);
+
+            let result = provider.call(&tx.into(), None).await
+                .map_err(|e| ExecutionError::NetworkError(format!("isApprovedForAll: {}", e)))?;
+
+            // Decode bool result (last byte of 32-byte word)
+            let is_approved = result.len() >= 32 && result[31] == 1;
+
+            if is_approved {
+                info!("✅ CTF approved for {} ({:?})", name, operator);
+            } else {
+                warn!("🔓 CTF NOT approved for {} — sending setApprovalForAll tx...", name);
+
+                // Build setApprovalForAll(operator, true) — selector 0xa22cb465
+                let approve_data = ethers::abi::encode(&[
+                    Token::Address(*operator),
+                    Token::Bool(true),
+                ]);
+                let mut approve_call = vec![0xa2, 0x2c, 0xb4, 0x65];
+                approve_call.extend_from_slice(&approve_data);
+
+                // Sign and send the transaction
+                let chain_id: u64 = 137; // Polygon mainnet
+                let wallet: LocalWallet = self.config.polymarket.private_key.parse::<LocalWallet>()
+                    .map_err(|e| ExecutionError::SigningFailed(format!("wallet: {}", e)))?
+                    .with_chain_id(chain_id);
+
+                let client = SignerMiddleware::new(provider.clone(), wallet);
+
+                let tx = TransactionRequest::new()
+                    .to(ctf_addr)
+                    .data(approve_call)
+                    .gas(100_000u64) // setApprovalForAll is cheap
+                    .chain_id(chain_id);
+
+                let send_result = client.send_transaction(tx, None).await;
+                match send_result {
+                    Ok(pending) => {
+                        let tx_hash = pending.tx_hash();
+                        info!("📝 Approval tx sent for {}: {:?}", name, tx_hash);
+                        let receipt_result = pending.await;
+                        match receipt_result {
+                            Ok(Some(receipt)) => {
+                                info!("✅ Approval confirmed for {} in block {:?} (gas: {:?})",
+                                      name, receipt.block_number, receipt.gas_used);
+                            }
+                            Ok(None) => warn!("⚠️  Approval tx for {} dropped", name),
+                            Err(e) => warn!("⚠️  Approval tx for {} failed: {}", name, e),
+                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Could not send approval for {}: {}", name, e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Notify the CLOB server to refresh its view of on-chain token allowances.
+    /// Must be called after setting on-chain approvals so the CLOB knows about them.
+    pub async fn update_clob_balance_allowance(&self) -> Result<(), ExecutionError> {
+        // Update for conditional tokens (needed for sells)
+        let path = "/update-balance-allowance";
+        let body = serde_json::json!({
+            "asset_type": 1  // CONDITIONAL = 1
+        });
+        let body_str = serde_json::to_string(&body)
+            .map_err(|e| ExecutionError::SigningFailed(e.to_string()))?;
+
+        let headers = self.l2_headers("POST", path, &body_str)?;
+        let url = format!("{}{}", self.config.polymarket.rest_url, path);
+
+        let mut request = self.client
+            .post(&url)
+            .header("Content-Type", "application/json");
+
+        for (key, value) in &headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        match request.body(body_str).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    info!("✅ CLOB balance/allowance updated for conditional tokens");
+                } else {
+                    warn!("⚠️  CLOB update-balance-allowance: {} - {}", status, &text[..text.len().min(200)]);
+                }
+            }
+            Err(e) => warn!("⚠️  CLOB update-balance-allowance failed: {}", e),
+        }
+
+        // Also update for collateral (USDC)
+        let body2 = serde_json::json!({ "asset_type": 0 });
+        let body_str2 = serde_json::to_string(&body2).unwrap();
+        let headers2 = self.l2_headers("POST", path, &body_str2)?;
+        let url2 = format!("{}{}", self.config.polymarket.rest_url, path);
+        let mut req2 = self.client.post(&url2).header("Content-Type", "application/json");
+        for (key, value) in &headers2 {
+            req2 = req2.header(key.as_str(), value.as_str());
+        }
+        if let Ok(resp) = req2.body(body_str2).send().await {
+            if resp.status().is_success() {
+                info!("✅ CLOB balance/allowance updated for collateral (USDC)");
+            }
+        }
+
+        Ok(())
     }
 
     /// Check USDC.e balance on-chain and set capital limit accordingly.

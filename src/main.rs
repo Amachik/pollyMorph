@@ -244,6 +244,16 @@ async fn main() -> anyhow::Result<()> {
                 warn!("⚠️  Could not check USDC.e balance: {} (using default capital limit)", e);
             }
         }
+        // Ensure conditional token approvals for sell orders
+        match executor.ensure_token_approvals().await {
+            Ok(()) => info!("🔓 Token approvals verified"),
+            Err(e) => warn!("⚠️  Token approval check failed: {} (sells may fail)", e),
+        }
+        // Notify CLOB about on-chain balance/allowances
+        match executor.update_clob_balance_allowance().await {
+            Ok(()) => {}
+            Err(e) => warn!("⚠️  CLOB balance sync failed: {}", e),
+        }
         // Bootstrap inventory from recent trades (recover positions from previous runs)
         match executor.bootstrap_positions(&pricing_engine.inventory).await {
             Ok(n) => {

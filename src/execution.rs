@@ -106,7 +106,13 @@ impl OrderExecutor {
             .timeout(std::time::Duration::from_millis(timeout_ms))
             .pool_max_idle_per_host(10)
             .tcp_nodelay(true)
-            .user_agent("polymorph-hft/1.0");
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .default_headers({
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
+                h.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
+                h
+            });
 
         if let Some((ref host, port)) = tunnel_mode {
             builder = builder.resolve(

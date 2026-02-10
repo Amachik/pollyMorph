@@ -147,7 +147,10 @@ impl OrderExecutor {
                 let mut h = reqwest::header::HeaderMap::new();
                 h.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
                 h.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9".parse().unwrap());
-                h.insert(reqwest::header::CONNECTION, "keep-alive".parse().unwrap());
+                // Note: Do NOT set Connection header — it's a hop-by-hop header
+                // prohibited in HTTP/2 (RFC 7540 §8.1.2.2). Setting it causes
+                // "Connection header illegal in HTTP/2" warnings from hyper on
+                // every response. HTTP/2 connections are persistent by design.
                 h
             });
 

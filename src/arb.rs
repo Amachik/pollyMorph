@@ -1456,6 +1456,61 @@ impl ArbEngine {
         info!("🚀 EXECUTING ARB: {} | {:.0} pairs across {} levels | spread {:.2}%",
               market.title, opp.total_pairs, opp.up_orders.len() + opp.down_orders.len(), spread_pct);
 
+        // ── FRESH BOOK FETCH ─────────────────────────────────────────────
+        // The WS-triggered opportunity was detected on cached depth data.
+        // By the time we get here (~1-5ms later), levels may have been consumed.
+        // Fetch fresh books via REST (~30-50ms) and re-run the sweep to get
+        // accurate, up-to-date depth for order building. IOC orders protect us
+        // from stale levels, but fresh data means fewer wasted order slots.
+        let opp = match self.fetch_both_books(&market.up_token_id, &market.down_token_id).await {
+            Ok((fresh_up, fresh_down)) => {
+                // Update cache with fresh data
+                self.book_cache.insert(market.up_token_id.clone(), fresh_up.clone());
+                self.book_cache.insert(market.down_token_id.clone(), fresh_down.clone());
+
+                // Re-run sweep on fresh books
+                match self.find_arb_pairs(market, &fresh_up, &fresh_down) {
+                    Some(fresh_opp) => {
+                        if fresh_opp.total_pairs < MIN_ORDER_SIZE {
+                            info!("   📉 Fresh books: opportunity vanished (< {:.0} pairs)", MIN_ORDER_SIZE);
+                            metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["stale_opportunity"]).inc();
+                            return;
+                        }
+                        let fresh_spread = (1.0 - fresh_opp.avg_pair_cost) * 100.0;
+                        if fresh_opp.total_pairs < opp.total_pairs * 0.5 {
+                            info!("   📉 Fresh books: {:.0} → {:.0} pairs ({:.2}% spread) — significantly reduced",
+                                  opp.total_pairs, fresh_opp.total_pairs, fresh_spread);
+                        } else {
+                            debug!("   📊 Fresh books: {:.0} → {:.0} pairs ({:.2}% spread)",
+                                   opp.total_pairs, fresh_opp.total_pairs, fresh_spread);
+                        }
+                        fresh_opp
+                    }
+                    None => {
+                        info!("   📉 Fresh books: no opportunity remaining — aborting");
+                        metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["stale_opportunity"]).inc();
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                // REST fetch failed — proceed with cached data (IOC orders protect us)
+                warn!("   ⚠️  Fresh book fetch failed: {} — using cached data", e);
+                opp
+            }
+        };
+
+        // Re-check capital against potentially updated opportunity
+        let effective_capital = available_capital.min(self.max_per_cycle);
+        if effective_capital < opp.total_cost {
+            let scale = effective_capital / opp.total_cost;
+            if scale < MIN_ORDER_SIZE / opp.total_pairs {
+                warn!("Insufficient capital after fresh book: ${:.2} available, need ${:.2}", effective_capital, opp.total_cost);
+                metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["insufficient_capital"]).inc();
+                return;
+            }
+        }
+
         // Token info was pre-registered during discover_and_subscribe — no HTTP calls needed here.
         let up_hash = hash_asset_id(&market.up_token_id);
         let down_hash = hash_asset_id(&market.down_token_id);
@@ -1945,18 +2000,21 @@ impl ArbEngine {
         let mut calldata = fn_selector.to_vec();
         calldata.extend_from_slice(&encoded_params);
 
-        let tx = TransactionRequest::new()
+        // Estimate gas using a legacy tx (cheaper RPC call)
+        let estimate_tx = TransactionRequest::new()
             .to(ctf_addr)
             .data(calldata.clone())
             .from(client.address());
 
-        let gas_estimate = client.estimate_gas(&tx.clone().into(), None).await
+        let gas_estimate = client.estimate_gas(&estimate_tx.into(), None).await
             .map_err(|e| format!("Merge gas estimation failed: {}", e))?;
 
-        let gas_limit = gas_estimate * 120 / 100;
-        let tx_with_gas = tx.gas(gas_limit);
+        // Build EIP-1559 tx with dynamic gas pricing
+        let typed_tx = Self::build_eip1559_tx(
+            client.provider(), ctf_addr, calldata, client.address(), gas_estimate
+        ).await?;
 
-        let pending_tx = client.send_transaction(tx_with_gas, None).await
+        let pending_tx = client.send_transaction(typed_tx, None).await
             .map_err(|e| format!("Merge tx send failed: {}", e))?;
 
         let tx_hash = format!("{:?}", pending_tx.tx_hash());
@@ -2028,24 +2086,102 @@ impl ArbEngine {
         let mut calldata = fn_selector.to_vec();
         calldata.extend_from_slice(&encoded_params);
 
-        let tx = TransactionRequest::new()
+        // Estimate gas using a legacy tx (cheaper RPC call)
+        let estimate_tx = TransactionRequest::new()
             .to(ctf_addr)
             .data(calldata.clone())
             .from(client.address());
 
-        let gas_estimate = client.estimate_gas(&tx.clone().into(), None).await
+        let gas_estimate = client.estimate_gas(&estimate_tx.into(), None).await
             .map_err(|e| format!("Redeem gas estimation failed: {}", e))?;
 
-        let gas_limit = gas_estimate * 120 / 100;
-        let tx_with_gas = tx.gas(gas_limit);
+        // Build EIP-1559 tx with dynamic gas pricing
+        let typed_tx = Self::build_eip1559_tx(
+            client.provider(), ctf_addr, calldata, client.address(), gas_estimate
+        ).await?;
 
-        let pending_tx = client.send_transaction(tx_with_gas, None).await
+        let pending_tx = client.send_transaction(typed_tx, None).await
             .map_err(|e| format!("Redeem tx send failed: {}", e))?;
 
         let tx_hash = format!("{:?}", pending_tx.tx_hash());
         info!("   🔗 Redeem tx sent: {} (waiting for confirmation...)", tx_hash);
 
         Self::wait_for_tx(pending_tx, tx_hash, "Redeem").await
+    }
+
+    /// Build an EIP-1559 transaction with dynamic gas pricing from the Polygon network.
+    ///
+    /// Uses eth_maxPriorityFeePerGas RPC call + latest block baseFeePerGas to compute:
+    /// - max_priority_fee_per_gas: tip for validators (from RPC suggestion)
+    /// - max_fee_per_gas: baseFee * 2 + priority_fee (2x buffer for base fee volatility)
+    ///
+    /// Falls back to legacy TransactionRequest if EIP-1559 data is unavailable.
+    /// Polygon has supported EIP-1559 since the London hard fork.
+    /// Docs: https://docs.polygon.technology/pos/concepts/transactions/eip-1559/
+    async fn build_eip1559_tx(
+        provider: &ethers::providers::Provider<ethers::providers::Http>,
+        to: ethers::types::Address,
+        calldata: Vec<u8>,
+        from: ethers::types::Address,
+        gas_estimate: ethers::types::U256,
+    ) -> Result<ethers::types::transaction::eip2718::TypedTransaction, String> {
+        use ethers::prelude::*;
+
+        let gas_limit = gas_estimate * 120 / 100; // 20% buffer
+
+        // Try to get EIP-1559 gas parameters from the network
+        let eip1559_result: Result<(U256, U256), String> = async {
+            // Get suggested priority fee from the node
+            let priority_fee: U256 = provider.request("eth_maxPriorityFeePerGas", ())
+                .await
+                .map_err(|e| format!("eth_maxPriorityFeePerGas failed: {}", e))?;
+
+            // Get base fee from latest block
+            let block = provider.get_block(BlockNumber::Latest)
+                .await
+                .map_err(|e| format!("get_block failed: {}", e))?
+                .ok_or_else(|| "No latest block".to_string())?;
+
+            let base_fee = block.base_fee_per_gas
+                .ok_or_else(|| "No baseFeePerGas in block (pre-London?)".to_string())?;
+
+            // max_fee = 2 * baseFee + priorityFee
+            // The 2x multiplier on baseFee handles up to ~6 consecutive full blocks
+            // of base fee increases before the tx becomes unsubmittable.
+            let max_fee = base_fee * 2 + priority_fee;
+
+            Ok((max_fee, priority_fee))
+        }.await;
+
+        match eip1559_result {
+            Ok((max_fee, priority_fee)) => {
+                let tx = Eip1559TransactionRequest::new()
+                    .to(to)
+                    .data(calldata)
+                    .from(from)
+                    .gas(gas_limit)
+                    .max_fee_per_gas(max_fee)
+                    .max_priority_fee_per_gas(priority_fee)
+                    .chain_id(137u64); // Polygon
+
+                debug!("⛽ EIP-1559 gas: maxFee={} gwei, priorityFee={} gwei, gasLimit={}",
+                       max_fee.as_u64() / 1_000_000_000,
+                       priority_fee.as_u64() / 1_000_000_000,
+                       gas_limit);
+
+                Ok(tx.into())
+            }
+            Err(e) => {
+                // Fallback to legacy tx if EIP-1559 data unavailable
+                warn!("⛽ EIP-1559 gas query failed: {} — using legacy tx", e);
+                let tx = TransactionRequest::new()
+                    .to(to)
+                    .data(calldata)
+                    .from(from)
+                    .gas(gas_limit);
+                Ok(tx.into())
+            }
+        }
     }
 
     /// Parse a hex condition ID string into a 32-byte array.
@@ -2432,6 +2568,67 @@ async fn run_book_watcher(
     }
 }
 
+/// Build an EIP-1559 transaction with dynamic gas pricing (standalone version for background tasks).
+/// Queries eth_maxPriorityFeePerGas + latest block baseFeePerGas from the Polygon RPC.
+/// Falls back to legacy TransactionRequest if EIP-1559 data is unavailable.
+async fn build_eip1559_tx_standalone(
+    provider: &ethers::providers::Provider<ethers::providers::Http>,
+    to: ethers::types::Address,
+    calldata: Vec<u8>,
+    from: ethers::types::Address,
+    gas_estimate: ethers::types::U256,
+) -> Result<ethers::types::transaction::eip2718::TypedTransaction, String> {
+    use ethers::prelude::*;
+
+    let gas_limit = gas_estimate * 120 / 100;
+
+    let eip1559_result: Result<(U256, U256), String> = async {
+        let priority_fee: U256 = provider.request("eth_maxPriorityFeePerGas", ())
+            .await
+            .map_err(|e| format!("eth_maxPriorityFeePerGas failed: {}", e))?;
+
+        let block = provider.get_block(BlockNumber::Latest)
+            .await
+            .map_err(|e| format!("get_block failed: {}", e))?
+            .ok_or_else(|| "No latest block".to_string())?;
+
+        let base_fee = block.base_fee_per_gas
+            .ok_or_else(|| "No baseFeePerGas in block".to_string())?;
+
+        let max_fee = base_fee * 2 + priority_fee;
+        Ok((max_fee, priority_fee))
+    }.await;
+
+    match eip1559_result {
+        Ok((max_fee, priority_fee)) => {
+            let tx = Eip1559TransactionRequest::new()
+                .to(to)
+                .data(calldata)
+                .from(from)
+                .gas(gas_limit)
+                .max_fee_per_gas(max_fee)
+                .max_priority_fee_per_gas(priority_fee)
+                .chain_id(137u64);
+
+            debug!("⛽ [BG] EIP-1559 gas: maxFee={} gwei, priorityFee={} gwei, gasLimit={}",
+                   max_fee.as_u64() / 1_000_000_000,
+                   priority_fee.as_u64() / 1_000_000_000,
+                   gas_limit);
+
+            Ok(tx.into())
+        }
+        Err(e) => {
+            warn!("⛽ [BG] EIP-1559 gas query failed: {} — using legacy tx", e);
+            let tx = TransactionRequest::new()
+                .to(to)
+                .data(calldata)
+                .from(from)
+                .gas(gas_limit);
+            Ok(tx.into())
+        }
+    }
+}
+
 /// Run a merge operation in a background task.
 /// This function performs ALL on-chain work that would otherwise block the event loop:
 /// 1. Query on-chain ERC-1155 balances (verify tokens settled)
@@ -2577,12 +2774,13 @@ async fn run_background_merge(
     let mut calldata = fn_selector.to_vec();
     calldata.extend_from_slice(&encoded_params);
 
-    let tx = TransactionRequest::new()
+    // Estimate gas using a legacy tx
+    let estimate_tx = TransactionRequest::new()
         .to(ctf_addr)
-        .data(calldata)
+        .data(calldata.clone())
         .from(client.address());
 
-    let gas_estimate = match client.estimate_gas(&tx.clone().into(), None).await {
+    let gas_estimate = match client.estimate_gas(&estimate_tx.into(), None).await {
         Ok(g) => g,
         Err(e) => return MergeResult {
             event_slug: event_slug.to_string(),
@@ -2592,9 +2790,20 @@ async fn run_background_merge(
         },
     };
 
-    let tx_with_gas = tx.gas(gas_estimate * 120 / 100);
+    // Build EIP-1559 tx with dynamic gas pricing
+    let typed_tx = match build_eip1559_tx_standalone(
+        client.provider(), ctf_addr, calldata, client.address(), gas_estimate
+    ).await {
+        Ok(tx) => tx,
+        Err(e) => return MergeResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            excess_position: None, was_merge: true,
+            error: Some(format!("EIP-1559 tx build failed: {}", e)),
+        },
+    };
 
-    let pending_tx = match client.send_transaction(tx_with_gas, None).await {
+    let pending_tx = match client.send_transaction(typed_tx, None).await {
         Ok(pt) => pt,
         Err(e) => return MergeResult {
             event_slug: event_slug.to_string(),
@@ -2782,12 +2991,13 @@ async fn run_background_redeem(
     let mut calldata = fn_selector.to_vec();
     calldata.extend_from_slice(&encoded_params);
 
-    let tx = TransactionRequest::new()
+    // Estimate gas using a legacy tx
+    let estimate_tx = TransactionRequest::new()
         .to(ctf_addr)
-        .data(calldata)
+        .data(calldata.clone())
         .from(client.address());
 
-    let gas_estimate = match client.estimate_gas(&tx.clone().into(), None).await {
+    let gas_estimate = match client.estimate_gas(&estimate_tx.into(), None).await {
         Ok(g) => g,
         Err(e) => return MergeResult {
             event_slug: event_slug.to_string(),
@@ -2797,9 +3007,21 @@ async fn run_background_redeem(
         },
     };
 
-    let tx_with_gas = tx.gas(gas_estimate * 120 / 100);
+    // Build EIP-1559 tx with dynamic gas pricing
+    // Use client.provider() since `provider` was moved into SignerMiddleware
+    let typed_tx = match build_eip1559_tx_standalone(
+        client.provider(), ctf_addr, calldata, client.address(), gas_estimate
+    ).await {
+        Ok(tx) => tx,
+        Err(e) => return MergeResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            excess_position: None, was_merge: false,
+            error: Some(format!("EIP-1559 tx build failed: {}", e)),
+        },
+    };
 
-    let pending_tx = match client.send_transaction(tx_with_gas, None).await {
+    let pending_tx = match client.send_transaction(typed_tx, None).await {
         Ok(pt) => pt,
         Err(e) => return MergeResult {
             event_slug: event_slug.to_string(),

@@ -732,13 +732,16 @@ impl ArbEngine {
 
     /// Scan Gamma API for active BTC/ETH Up/Down hourly events.
     ///
-    /// Uses the /events endpoint with closed=false to discover ALL active events,
-    /// including currently-running hourly markets. The /series endpoint misses
-    /// today's already-started events because it marks them as closed.
+    /// Fetches the newest events (without closed=false filter) because Polymarket
+    /// marks hourly events as closed=true once they start, even though markets
+    /// inside are still actively trading. We rely on per-market `acceptingOrders`
+    /// and duration-based filtering (~1hr windows only) instead.
     async fn scan_markets(&self) -> Result<Vec<ArbMarket>, String> {
-        // Fetch all active (non-closed) events — the docs-recommended approach.
-        // This returns full event data with nested markets[] including clobTokenIds.
-        let url = "https://gamma-api.polymarket.com/events?closed=false&order=id&ascending=false&limit=100";
+        // Do NOT use closed=false — Polymarket marks hourly events as closed=true
+        // once they start, even though markets inside are still actively trading.
+        // Instead fetch the newest events (by ID) and rely on per-market
+        // `acceptingOrders` to determine if they're still tradeable.
+        let url = "https://gamma-api.polymarket.com/events?order=id&ascending=false&limit=200";
 
         let resp = self.client.get(url).send().await
             .map_err(|e| format!("Events HTTP error: {}", e))?;
@@ -750,6 +753,7 @@ impl ArbEngine {
         let events: Vec<serde_json::Value> = resp.json().await
             .map_err(|e| format!("Events JSON parse error: {}", e))?;
 
+        let now = chrono::Utc::now().timestamp();
         let mut markets = Vec::new();
 
         for event in &events {
@@ -775,6 +779,18 @@ impl ArbEngine {
                     Some(a) => a,
                     None => continue,
                 };
+
+                // Skip markets that ended more than 5 minutes ago
+                if arb.event_end_ts > 0 && arb.event_end_ts < now - 300 {
+                    continue;
+                }
+
+                // Only target ~1-hour window markets (3600s ± 900s tolerance).
+                // This excludes 15-minute windows (900s) and 4-hour windows (14400s).
+                let duration = arb.event_end_ts - arb.event_start_ts;
+                if duration < 2700 || duration > 4500 {
+                    continue;
+                }
 
                 let accepting = market.get("acceptingOrders")
                     .and_then(|v| v.as_bool())

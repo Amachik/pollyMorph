@@ -794,17 +794,26 @@ impl ArbEngine {
 
         // Collect event IDs — do NOT filter by closed boolean.
         // Only skip events whose endDate is clearly in the past.
+        // NOTE: `startDate` on stubs is the event *creation* date (2 days before),
+        // NOT the market window start. Use `endDate` for sorting instead.
         let mut candidates: Vec<(String, i64)> = Vec::new();
 
         for event in events {
             let end_str = event.get("endDate").and_then(|v| v.as_str()).unwrap_or("");
-            if !end_str.is_empty() {
-                if let Ok(end_dt) = chrono::DateTime::parse_from_rfc3339(end_str) {
-                    if end_dt.timestamp() < now - 300 {
-                        continue; // Ended > 5 min ago
+            let end_ts = if !end_str.is_empty() {
+                match chrono::DateTime::parse_from_rfc3339(end_str) {
+                    Ok(end_dt) => {
+                        let ts = end_dt.timestamp();
+                        if ts < now - 300 {
+                            continue; // Ended > 5 min ago
+                        }
+                        ts
                     }
+                    Err(_) => i64::MAX,
                 }
-            }
+            } else {
+                i64::MAX
+            };
 
             let id_str = if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
                 id.to_string()
@@ -814,19 +823,11 @@ impl ArbEngine {
                 continue;
             };
 
-            let start_str = event.get("startDate")
-                .or_else(|| event.get("startTime"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let start_ts = chrono::DateTime::parse_from_rfc3339(start_str)
-                .map(|dt| dt.timestamp())
-                .unwrap_or(i64::MAX);
-
-            candidates.push((id_str, start_ts));
+            candidates.push((id_str, end_ts));
         }
 
-        // Sort by proximity to now: currently active first, then upcoming
-        candidates.sort_by_key(|(_, start_ts)| (*start_ts - now).abs());
+        // Sort by endDate ascending: soonest-ending (currently active) first
+        candidates.sort_by_key(|(_, end_ts)| *end_ts);
         // Take top 24 events (covers a full day of hourly markets)
         let event_ids: Vec<String> = candidates.into_iter()
             .take(24)

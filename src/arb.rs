@@ -34,8 +34,8 @@ use tracing::{info, warn, error, debug};
 // ---------------------------------------------------------------------------
 
 /// Maximum combined cost (Up + Down) we're willing to pay per pair.
-/// $0.98 means we need at least 2% spread to enter.
-const MAX_PAIR_COST: f64 = 0.98;
+/// $0.99 means we need at least 1% spread to enter.
+const MAX_PAIR_COST: f64 = 0.99;
 
 
 /// Minimum order size in tokens (Polymarket enforces 5 for these markets).

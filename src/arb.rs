@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, error, debug, trace};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2835,7 +2835,7 @@ async fn dispatch_single_ws_message(
                     let best_ask = change.get("best_ask").and_then(|v| v.as_str())
                         .and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
 
-                    debug!("📊 price_change: {}... bid={:.2} ask={:.2}",
+                    trace!("📊 price_change: {}... bid={:.2} ask={:.2}",
                            &asset_id[..16.min(asset_id.len())], best_bid, best_ask);
 
                     // Build a minimal TokenBook from price_change so the engine cache

@@ -8,7 +8,7 @@
 //! 1. Scan Gamma API for active hourly BTC/ETH Up/Down events
 //! 2. Fetch order books for both Up and Down tokens via CLOB REST
 //! 3. Detect arbitrage: best_ask_up + best_ask_down < threshold
-//! 4. Buy both sides simultaneously (FOK orders for guaranteed fills)
+//! 4. Buy both sides simultaneously (IOC orders for maximum partial fills)
 //! 5. Merge pairs on-chain via CTF mergePositions → instant $1/pair USDC recovery
 //! 6. Fallback: if merge fails, wait for resolution and redeem winning side
 //! 7. Repeat with next hourly market
@@ -34,19 +34,24 @@ use tracing::{info, warn, error, debug, trace};
 // ---------------------------------------------------------------------------
 
 /// Maximum combined cost (Up + Down) we're willing to pay per pair.
-/// $0.99 means we need at least 1% spread to enter.
-const MAX_PAIR_COST: f64 = 0.99;
+/// $0.995 means we need at least 0.5% spread to enter.
+/// Account88888 analysis shows profitable trades at combined costs up to ~0.995.
+const MAX_PAIR_COST: f64 = 0.995;
 
 
 /// Minimum order size in tokens (Polymarket enforces 5 for these markets).
-const MIN_ORDER_SIZE: f64 = 5.0;
+/// Reduced to allow testing with smaller capital amounts.
+const MIN_ORDER_SIZE: f64 = 1.0;
 
 /// How often to poll Gamma API for new markets (seconds).
-const MARKET_SCAN_INTERVAL_SECS: u64 = 30;
+/// Reduced from 30s to 10s — 15-minute markets need faster discovery.
+/// Account88888 starts trading within seconds of market open.
+const MARKET_SCAN_INTERVAL_SECS: u64 = 10;
 
 
 /// Seconds before market start to begin scanning the book.
-const PRE_MARKET_LEAD_SECS: i64 = 300; // 5 minutes before
+/// Increased to 10 min so we pre-subscribe to WS and catch the first book snapshot.
+const PRE_MARKET_LEAD_SECS: i64 = 600; // 10 minutes before
 
 /// Fraction of market duration after start during which we'll attempt entry.
 /// 0.5 = first half of the window (30 min for 1hr, 7.5 min for 15m).
@@ -165,6 +170,16 @@ enum ArbWsEvent {
     BookSnapshot {
         asset_id: String,
         book: TokenBook,
+    },
+    /// Top-of-book price update (event_type: "price_change").
+    /// Updates best_bid/best_ask WITHOUT replacing full depth data.
+    /// This is critical: price_change events are frequent but lack depth info.
+    /// If we replaced the full book, we'd destroy the real multi-level depth
+    /// from "book" snapshots, causing incorrect opportunity sizing.
+    PriceUpdate {
+        asset_id: String,
+        best_bid: f64,
+        best_ask: f64,
     },
     /// Market resolved event (event_type: "market_resolved").
     /// Contains the winning asset ID so we can trigger instant redemption.
@@ -343,8 +358,9 @@ impl ArbEngine {
     pub async fn run(&mut self) {
         info!("🎯 ARB ENGINE STARTED — Capital: ${:.2}, Max/cycle: ${:.2}",
               self.capital_usdc, self.max_per_cycle);
-        info!("   Strategy: Buy both Up+Down when spread > {:.0}%", (1.0 - MAX_PAIR_COST) * 100.0);
-        info!("   Targets: BTC/ETH/SOL/XRP × 1hr+15m (real-time WebSocket + {}s REST discovery)", MARKET_SCAN_INTERVAL_SECS);
+        info!("   Strategy: Buy both Up+Down when spread > {:.1}% (max pair cost ${:.3})", (1.0 - MAX_PAIR_COST) * 100.0, MAX_PAIR_COST);
+        info!("   Targets: BTC/ETH/SOL/XRP × 1hr+15m | {}s scan | {}s pre-sub | parallel execution",
+              MARKET_SCAN_INTERVAL_SECS, PRE_MARKET_LEAD_SECS);
 
         // Market discovery timer — REST poll Gamma API for new events
         let mut scan_interval = tokio::time::interval(
@@ -366,6 +382,9 @@ impl ArbEngine {
                     match ws_event {
                         Some(ArbWsEvent::BookSnapshot { asset_id, book }) => {
                             self.handle_book_update(asset_id, book).await;
+                        }
+                        Some(ArbWsEvent::PriceUpdate { asset_id, best_bid, best_ask }) => {
+                            self.handle_price_update(asset_id, best_bid, best_ask).await;
                         }
                         Some(ArbWsEvent::MarketResolved { market_condition_id, winning_asset_id, winning_outcome }) => {
                             info!("🏁 WS: Market resolved — winner: {} ({})", winning_outcome, &winning_asset_id[..20.min(winning_asset_id.len())]);
@@ -449,7 +468,11 @@ impl ArbEngine {
 
     /// Handle a real-time book update from the WebSocket.
     /// This is the HOT PATH — called on every book change for subscribed assets.
-    /// Checks if both sides of a market have cached books, then runs spread detection.
+    ///
+    /// CONTINUOUS ACCUMULATION: Unlike the old single-entry approach, we now
+    /// allow re-entry into markets with existing positions. Account88888 executes
+    /// 267 trades over 5 minutes in a single market — we must do the same.
+    /// Merging is deferred until the entry window closes (see check_and_redeem).
     async fn handle_book_update(&mut self, asset_id: String, book: TokenBook) {
         // Update cache
         self.book_cache.insert(asset_id.clone(), book);
@@ -465,12 +488,9 @@ impl ArbEngine {
             None => return,
         };
 
-        // Skip if we already have a position in this market
-        if self.has_position(&market.event_slug) {
-            return;
-        }
-
-        // Re-entry guard: skip if execution is already in progress for this market
+        // Re-entry guard: skip if order submission is in-flight for this market.
+        // This is a SHORT-LIVED guard (~1-2s during signing+submission), NOT a
+        // long-lived block like the old merge-based guard.
         if self.executing_slugs.contains(&market.event_slug) {
             return;
         }
@@ -482,7 +502,7 @@ impl ArbEngine {
         }
         let entry_window = ((market.event_end_ts - market.event_start_ts) as f64 * ENTRY_WINDOW_FRACTION) as i64;
         if now > market.event_start_ts + entry_window {
-            return; // Too late
+            return; // Past entry window — merging will happen in check_and_redeem
         }
 
         // Check if we have BOTH Up and Down books cached
@@ -508,25 +528,113 @@ impl ArbEngine {
         // Run spread detection on cached books (no HTTP call needed!)
         match self.check_arb_from_books(&market, &up_book, &down_book) {
             Some(opp) => {
+                let is_accumulating = self.has_position(&market.event_slug);
                 let spread_pct = (1.0 - opp.avg_pair_cost) * 100.0;
-                info!("⚡ WS ARB OPPORTUNITY: {} | {:.0} pairs | spread {:.2}% | profit ${:.2}",
+                info!("⚡ WS ARB {}: {} | {:.0} pairs | spread {:.2}% | profit ${:.2}",
+                      if is_accumulating { "ACCUMULATE" } else { "OPPORTUNITY" },
                       market.title, opp.total_pairs, spread_pct, opp.expected_profit);
 
                 metrics::ARB_OPPORTUNITIES_DETECTED.with_label_values(&[asset_lbl, "ws"]).inc();
                 metrics::ARB_AVAILABLE_PAIRS.with_label_values(&[asset_lbl]).set(opp.total_pairs);
 
-                // Set re-entry guard BEFORE execution
+                // Set short-lived re-entry guard during order submission
                 self.executing_slugs.insert(market.event_slug.clone());
-                let bg_task_spawned = self.execute_arb(&market, opp).await;
-                // Only clear the guard if no background task was spawned.
-                // If a merge task IS running, handle_merge_result will clear it.
-                if !bg_task_spawned {
-                    self.executing_slugs.remove(&market.event_slug);
-                }
+                self.execute_arb(&market, opp).await;
+                // Always clear the guard immediately — we no longer tie it to merge lifecycle.
+                // The guard only prevents concurrent order submissions for the same market.
+                self.executing_slugs.remove(&market.event_slug);
             }
             None => {
                 metrics::ARB_AVAILABLE_PAIRS.with_label_values(&[asset_lbl]).set(0.0);
             }
+        }
+    }
+
+    /// Handle a price_change event — update top-of-book WITHOUT destroying depth.
+    ///
+    /// price_change events are more frequent than full book snapshots. The old code
+    /// replaced the entire cached book with a fake 1-level/100-token book, which
+    /// destroyed real multi-level depth data and caused incorrect opportunity sizing.
+    ///
+    /// Now we update ONLY best_bid/best_ask summary fields on the existing cached
+    /// book, without touching ask_levels (preserving sort invariant).
+    /// If no book is cached yet, we create a minimal placeholder
+    /// (will be replaced by the next full "book" snapshot).
+    async fn handle_price_update(&mut self, asset_id: String, best_bid: f64, best_ask: f64) {
+        if let Some(cached) = self.book_cache.get_mut(&asset_id) {
+            // Update ONLY the top-of-book summary fields — do NOT touch ask_levels.
+            // ask_levels must remain sorted ascending from the last full "book" snapshot.
+            // If we modified asks[0].price here, we could break the sort invariant:
+            //   e.g., old asks = [(0.49, 100), (0.50, 50)], price_change says best_ask = 0.51
+            //   → asks would become [(0.51, 100), (0.50, 50)] — UNSORTED, breaks sweep.
+            // The spread detector uses best_ask for the quick check; find_arb_pairs uses
+            // the sorted ask_levels for actual sizing. IOC orders handle any staleness.
+            cached.best_bid = best_bid;
+            cached.best_ask = best_ask;
+        } else {
+            // No cached book yet — create minimal placeholder.
+            // This will be overwritten by the next full "book" snapshot.
+            self.book_cache.insert(asset_id.clone(), TokenBook {
+                best_bid,
+                best_ask,
+                ask_levels: vec![BookLevel { price: best_ask, size: 100.0 }],
+                total_ask_depth: 100.0,
+            });
+        }
+
+        // Now run the same spread detection as handle_book_update.
+        // We need the full book from cache (which was just updated in-place).
+        let event_slug = match self.asset_to_market.get(&asset_id) {
+            Some(slug) => slug.clone(),
+            None => return,
+        };
+        let market = match self.tracked_markets.get(&event_slug) {
+            Some(m) => m.clone(),
+            None => return,
+        };
+
+        if self.executing_slugs.contains(&market.event_slug) { return; }
+
+        let now = chrono::Utc::now().timestamp();
+        if now < market.event_start_ts - PRE_MARKET_LEAD_SECS { return; }
+        let entry_window = ((market.event_end_ts - market.event_start_ts) as f64 * ENTRY_WINDOW_FRACTION) as i64;
+        if now > market.event_start_ts + entry_window { return; }
+
+        let up_book = match self.book_cache.get(&market.up_token_id) {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let down_book = match self.book_cache.get(&market.down_token_id) {
+            Some(b) => b.clone(),
+            None => return,
+        };
+
+        // Update metrics (same as handle_book_update)
+        let asset_lbl = market.asset.label();
+        let pair_cost = up_book.best_ask + down_book.best_ask;
+        metrics::ARB_BEST_PAIR_COST.with_label_values(&[asset_lbl]).set(pair_cost);
+        metrics::ARB_SPREAD_PCT.with_label_values(&[asset_lbl]).set((1.0 - pair_cost) * 100.0);
+
+        // Quick exit: if top-of-book pair cost is above threshold, no opportunity
+        if pair_cost >= MAX_PAIR_COST { return; }
+
+        // Spread looks promising — run full sweep on cached (real-depth) books
+        match self.check_arb_from_books(&market, &up_book, &down_book) {
+            Some(opp) => {
+                let is_accumulating = self.has_position(&market.event_slug);
+                let spread_pct = (1.0 - opp.avg_pair_cost) * 100.0;
+                info!("⚡ WS ARB {}: {} | {:.0} pairs | spread {:.2}% | profit ${:.2}",
+                      if is_accumulating { "ACCUMULATE" } else { "OPPORTUNITY" },
+                      market.title, opp.total_pairs, spread_pct, opp.expected_profit);
+
+                metrics::ARB_OPPORTUNITIES_DETECTED.with_label_values(&[asset_lbl, "ws"]).inc();
+                metrics::ARB_AVAILABLE_PAIRS.with_label_values(&[asset_lbl]).set(opp.total_pairs);
+
+                self.executing_slugs.insert(market.event_slug.clone());
+                self.execute_arb(&market, opp).await;
+                self.executing_slugs.remove(&market.event_slug);
+            }
+            None => {}
         }
     }
 
@@ -618,14 +726,28 @@ impl ArbEngine {
 
                     let slug = market.event_slug.clone();
                     if !self.tracked_markets.contains_key(&slug) {
-                        info!("📡 Tracking new market: {} (Up: {}..., Down: {}...)",
-                              market.title,
+                        let pre_sub = if now < market.event_start_ts { " [PRE-OPEN]" } else { "" };
+                        info!("📡 Tracking new market: {}{} (Up: {}..., Down: {}...)",
+                              market.title, pre_sub,
                               &market.up_token_id[..16.min(market.up_token_id.len())],
                               &market.down_token_id[..16.min(market.down_token_id.len())]);
 
                         // Register in lookup maps
                         self.asset_to_market.insert(market.up_token_id.clone(), slug.clone());
                         self.asset_to_market.insert(market.down_token_id.clone(), slug.clone());
+
+                        // Pre-register token info so execute_arb doesn't need HTTP calls.
+                        // This moves ~200ms of latency off the hot path.
+                        let up_hash = hash_asset_id(&market.up_token_id);
+                        let down_hash = hash_asset_id(&market.down_token_id);
+                        self.token_registry.register(up_hash, market.up_token_id.clone(), market.neg_risk);
+                        self.token_registry.register(down_hash, market.down_token_id.clone(), market.neg_risk);
+                        for (token_id, hash) in [
+                            (market.up_token_id.clone(), up_hash),
+                            (market.down_token_id.clone(), down_hash),
+                        ] {
+                            let _ = self.executor.fetch_and_register_market_info(&token_id, hash).await;
+                        }
 
                         // Collect for WS subscribe
                         if !self.ws_subscribed.contains(&market.up_token_id) {
@@ -698,7 +820,6 @@ impl ArbEngine {
         let now = chrono::Utc::now().timestamp();
 
         for market in markets {
-            if self.has_position(&market.event_slug) { continue; }
             if now < market.event_start_ts - PRE_MARKET_LEAD_SECS { continue; }
             let entry_window = ((market.event_end_ts - market.event_start_ts) as f64 * ENTRY_WINDOW_FRACTION) as i64;
             if now > market.event_start_ts + entry_window { continue; }
@@ -709,15 +830,14 @@ impl ArbEngine {
             match self.check_arb_opportunity(&market).await {
                 Ok(Some(opp)) => {
                     let spread_pct = (1.0 - opp.avg_pair_cost) * 100.0;
-                    info!("💰 REST ARB OPPORTUNITY: {} | {:.0} pairs | spread {:.2}% | profit ${:.2}",
+                    info!("💰 REST ARB {}: {} | {:.0} pairs | spread {:.2}% | profit ${:.2}",
+                          if self.has_position(&market.event_slug) { "ACCUMULATE" } else { "OPPORTUNITY" },
                           market.title, opp.total_pairs, spread_pct, opp.expected_profit);
                     metrics::ARB_OPPORTUNITIES_DETECTED.with_label_values(&[market.asset.label(), "rest"]).inc();
 
                     self.executing_slugs.insert(market.event_slug.clone());
-                    let bg_task_spawned = self.execute_arb(&market, opp).await;
-                    if !bg_task_spawned {
-                        self.executing_slugs.remove(&market.event_slug);
-                    }
+                    self.execute_arb(&market, opp).await;
+                    self.executing_slugs.remove(&market.event_slug);
                 }
                 Ok(None) => {}
                 Err(e) => { warn!("Failed to check arb for {}: {}", market.title, e); }
@@ -902,12 +1022,11 @@ impl ArbEngine {
                     continue;
                 }
 
-                let accepting = market.get("acceptingOrders")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !accepting {
-                    continue;
-                }
+                // NOTE: We intentionally do NOT filter by acceptingOrders here.
+                // Markets are created on Gamma API with clobTokenIds before they
+                // start accepting orders. By subscribing to their WS channels early,
+                // we receive the FIRST book snapshot the instant the market opens.
+                // The entry window check in handle_book_update prevents premature execution.
 
                 markets.push(arb);
             }
@@ -1218,17 +1337,18 @@ impl ArbEngine {
 
             let mut up_remaining = up_level.size;
 
-            // Match with Down levels
-            while up_remaining >= 1.0 && down_idx < down_book.ask_levels.len() {
+            // Match with Down levels — use fractional sizes (Polymarket supports them).
+            // Account88888 trades sizes like 114.934781 — flooring wastes liquidity.
+            while up_remaining >= 0.01 && down_idx < down_book.ask_levels.len() {
                 let down_level = &down_book.ask_levels[down_idx];
                 if down_level.price > max_down_price {
                     break; // This Down level is too expensive for this Up level
                 }
 
                 // How many pairs can we make at this combination?
-                let pairs = up_remaining.min(down_remaining_at_level).floor();
-                if pairs < 1.0 {
-                    if down_remaining_at_level < 1.0 {
+                let pairs = up_remaining.min(down_remaining_at_level);
+                if pairs < 0.01 {
+                    if down_remaining_at_level < 0.01 {
                         // Down level exhausted — advance to next
                         down_idx += 1;
                         if down_idx < down_book.ask_levels.len() {
@@ -1253,7 +1373,7 @@ impl ArbEngine {
                 up_remaining -= pairs;
                 down_remaining_at_level -= pairs;
 
-                if down_remaining_at_level < 1.0 {
+                if down_remaining_at_level < 0.01 {
                     down_idx += 1;
                     if down_idx < down_book.ask_levels.len() {
                         down_remaining_at_level = down_book.ask_levels[down_idx].size;
@@ -1307,14 +1427,12 @@ impl ArbEngine {
     /// Like Account88888, we fire orders at EVERY profitable price level,
     /// not just the best ask. This maximizes the number of pairs we accumulate.
     ///
-    /// Returns `true` if a background merge task was spawned (caller should NOT
-    /// clear executing_slugs — handle_merge_result will do it).
-    /// Returns `false` if no background task was spawned (caller should clear the guard).
+    /// Accumulates into existing positions. Merge is deferred to check_and_redeem().
     async fn execute_arb(
         &mut self,
         market: &ArbMarket,
         opp: ArbOpportunity,
-    ) -> bool {
+    ) {
         let asset_lbl = market.asset.label();
         let exec_start = std::time::Instant::now();
 
@@ -1328,7 +1446,7 @@ impl ArbEngine {
             if scale < MIN_ORDER_SIZE / opp.total_pairs {
                 warn!("Insufficient capital: ${:.2} available, need ${:.2}", effective_capital, opp.total_cost);
                 metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["insufficient_capital"]).inc();
-                return false;
+                return;
             }
             info!("   Scaling to {:.0}% of opportunity (capital limited)", scale * 100.0);
             // We'll cap individual order sizes below
@@ -1338,22 +1456,9 @@ impl ArbEngine {
         info!("🚀 EXECUTING ARB: {} | {:.0} pairs across {} levels | spread {:.2}%",
               market.title, opp.total_pairs, opp.up_orders.len() + opp.down_orders.len(), spread_pct);
 
-        // Register tokens in the registry
+        // Token info was pre-registered during discover_and_subscribe — no HTTP calls needed here.
         let up_hash = hash_asset_id(&market.up_token_id);
         let down_hash = hash_asset_id(&market.down_token_id);
-        self.token_registry.register(up_hash, market.up_token_id.clone(), market.neg_risk);
-        self.token_registry.register(down_hash, market.down_token_id.clone(), market.neg_risk);
-
-        // Fetch and register full market info for both tokens
-        for (token_id, hash) in [
-            (&market.up_token_id, up_hash),
-            (&market.down_token_id, down_hash),
-        ] {
-            if let Err(e) = self.executor.fetch_and_register_market_info(token_id, hash).await {
-                warn!("Failed to register market info for {}...: {}", &token_id[..20.min(token_id.len())], e);
-            }
-        }
-
         let up_market_id = MarketId { token_id: up_hash, condition_id: [0u8; 32] };
         let down_market_id = MarketId { token_id: down_hash, condition_id: [0u8; 32] };
 
@@ -1370,7 +1475,7 @@ impl ArbEngine {
         };
 
         for level in &opp.up_orders {
-            let scaled_size = (level.size * capital_scale).floor().max(0.0);
+            let scaled_size = level.size * capital_scale;
             if scaled_size < MIN_ORDER_SIZE { continue; }
 
             let cost = scaled_size * level.price;
@@ -1393,7 +1498,7 @@ impl ArbEngine {
         }
 
         for level in &opp.down_orders {
-            let scaled_size = (level.size * capital_scale).floor().max(0.0);
+            let scaled_size = level.size * capital_scale;
             if scaled_size < MIN_ORDER_SIZE { continue; }
 
             let cost = scaled_size * level.price;
@@ -1417,7 +1522,7 @@ impl ArbEngine {
 
         if up_signals.is_empty() || down_signals.is_empty() {
             warn!("No valid orders after capital scaling — skipping");
-            return false;
+            return;
         }
 
         let total_signals = up_signals.len() + down_signals.len();
@@ -1440,7 +1545,7 @@ impl ArbEngine {
         let up_sign_futures: Vec<_> = up_signals.iter().map(|sig| {
             self.executor.signer().prepare_order_full(
                 sig.market_id, sig.side, sig.price, sig.size,
-                sig.order_type, TimeInForce::FOK, 0,
+                sig.order_type, TimeInForce::IOC, 0,
                 up_token_str.clone(), up_neg_risk, up_fee,
             )
         }).collect();
@@ -1449,7 +1554,7 @@ impl ArbEngine {
         let down_sign_futures: Vec<_> = down_signals.iter().map(|sig| {
             self.executor.signer().prepare_order_full(
                 sig.market_id, sig.side, sig.price, sig.size,
-                sig.order_type, TimeInForce::FOK, 0,
+                sig.order_type, TimeInForce::IOC, 0,
                 down_token_str.clone(), down_neg_risk, down_fee,
             )
         }).collect();
@@ -1464,15 +1569,7 @@ impl ArbEngine {
         info!("   Signed {} orders in {:.1}ms", total_signals, sign_elapsed.as_secs_f64() * 1000.0);
         metrics::ARB_EXECUTION_LATENCY.with_label_values(&["signing"]).observe(sign_elapsed.as_secs_f64());
 
-        // Collect successfully signed orders, interleaving Up and Down
-        // so both sides fill simultaneously in each batch
-        struct TaggedOrder {
-            order: PreparedOrder,
-            side_label: &'static str,
-            seq: usize,
-        }
-
-        let mut interleaved: Vec<TaggedOrder> = Vec::with_capacity(total_signals);
+        // Collect successfully signed orders for parallel submission
         let mut up_ok: Vec<PreparedOrder> = Vec::new();
         let mut down_ok: Vec<PreparedOrder> = Vec::new();
 
@@ -1492,123 +1589,31 @@ impl ArbEngine {
         if up_ok.is_empty() || down_ok.is_empty() {
             warn!("Signing failed for one side — aborting arb (need both sides)");
             metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["signing_failed"]).inc();
-            return false;
+            return;
         }
 
-        // Interleave: Up[0], Down[0], Up[1], Down[1], ...
-        let max_len = up_ok.len().max(down_ok.len());
-        let mut up_seq = 0usize;
-        let mut down_seq = 0usize;
-        for i in 0..max_len {
-            if i < up_ok.len() {
-                interleaved.push(TaggedOrder {
-                    order: up_ok[i].clone(),
-                    side_label: "Up",
-                    seq: up_seq,
-                });
-                up_seq += 1;
-            }
-            if i < down_ok.len() {
-                interleaved.push(TaggedOrder {
-                    order: down_ok[i].clone(),
-                    side_label: "Down",
-                    seq: down_seq,
-                });
-                down_seq += 1;
-            }
-        }
-
-        // ── STEP 2: Submit in batches of 15 via POST /orders ─────────────
-        // Polymarket batch API accepts up to 15 orders per request.
-        // This is dramatically faster than individual POST /order calls.
-        const BATCH_LIMIT: usize = 15;
-
-        let mut up_orders_ok = 0u32;
-        let mut down_orders_ok = 0u32;
-        let mut up_tokens_total = 0.0_f64;
-        let mut down_tokens_total = 0.0_f64;
-        let mut up_cost_total = 0.0_f64;
-        let mut down_cost_total = 0.0_f64;
-
+        // ── STEP 2: Submit Up and Down batches IN PARALLEL ───────────────
+        // Instead of interleaving into one serial stream, we fire Up and Down
+        // as two independent parallel batch streams. This cuts submission
+        // latency roughly in half — critical for catching early spreads.
         let submit_start = std::time::Instant::now();
 
-        for (batch_idx, chunk) in interleaved.chunks(BATCH_LIMIT).enumerate() {
-            if batch_idx > 0 {
-                // Brief pause between batches to avoid Cloudflare 403
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-
-            let batch_orders: Vec<PreparedOrder> = chunk.iter()
-                .map(|t| t.order.clone())
-                .collect();
-
-            let results = self.executor.submit_orders_batch(&batch_orders).await;
-
-            for (k, result) in results.into_iter().enumerate() {
-                if k >= chunk.len() { break; }
-                let tagged = &chunk[k];
-                let requested_size = tagged.order.size.to_f64().unwrap_or(0.0);
-                let requested_price = tagged.order.price.to_f64().unwrap_or(0.0);
-
-                match result {
-                    Ok(fill) => {
-                        // CRITICAL: Use actual fill amounts from API, not requested size.
-                        // FAK orders can partially fill — takingAmount = actual tokens received.
-                        let actual_tokens = fill.tokens_filled();
-                        let actual_cost = fill.usdc_amount();
-
-                        // Only fall back to requested_size for DELAYED status where amounts
-                        // aren't yet known. For UNMATCHED (no fill) or MATCHED (fill known),
-                        // always use the actual amount — even if it's 0.
-                        let is_delayed = fill.status == "DELAYED";
-                        let tokens = if actual_tokens > 0.0 {
-                            actual_tokens
-                        } else if is_delayed {
-                            warn!("   ⏳ {} #{}: DELAYED — using requested size {:.0} as estimate",
-                                  tagged.side_label, tagged.seq + 1, requested_size);
-                            requested_size
-                        } else {
-                            0.0 // UNMATCHED or zero-fill — count as 0
-                        };
-                        let cost = if actual_cost > 0.0 {
-                            actual_cost
-                        } else if is_delayed {
-                            requested_size * requested_price
-                        } else {
-                            0.0
-                        };
-
-                        if tagged.side_label == "Up" {
-                            up_orders_ok += 1;
-                            up_tokens_total += tokens;
-                            up_cost_total += cost;
-                        } else {
-                            down_orders_ok += 1;
-                            down_tokens_total += tokens;
-                            down_cost_total += cost;
-                        }
-
-                        if actual_tokens > 0.0 && actual_tokens < requested_size * 0.99 {
-                            info!("   ✅ {} #{}: {:.1}/{:.0} tokens @ {:.3} (partial fill) → {} [{}]",
-                                  tagged.side_label, tagged.seq + 1, actual_tokens, requested_size,
-                                  requested_price, fill.order_id, fill.status);
-                        } else {
-                            info!("   ✅ {} #{}: {:.0} tokens @ {:.3} → {} [{}]",
-                                  tagged.side_label, tagged.seq + 1, tokens, requested_price,
-                                  fill.order_id, fill.status);
-                        }
-                    }
-                    Err(ref e) => {
-                        warn!("   ❌ {} #{} failed: {}", tagged.side_label, tagged.seq + 1, e);
-                    }
-                }
-            }
-        }
+        // Fire Up and Down batch streams in parallel
+        let executor_ref = &*self.executor;
+        let up_count = up_ok.len();
+        let down_count = down_ok.len();
+        let ((up_orders_ok, up_tokens_total, up_cost_total),
+             (down_orders_ok, down_tokens_total, down_cost_total)) = tokio::join!(
+            submit_order_side(executor_ref, up_ok, "Up"),
+            submit_order_side(executor_ref, down_ok, "Down"),
+        );
 
         let submit_elapsed = submit_start.elapsed();
-        info!("   Submitted {} orders in {:.0}ms ({} batches)",
+        let up_batches = (up_count + 14) / 15;
+        let down_batches = (down_count + 14) / 15;
+        info!("   Submitted {} orders in {:.0}ms ({} Up + {} Down batches, parallel)",
               total_signals, submit_elapsed.as_secs_f64() * 1000.0,
-              (total_signals + BATCH_LIMIT - 1) / BATCH_LIMIT);
+              up_batches, down_batches);
         metrics::ARB_EXECUTION_LATENCY.with_label_values(&["submission"]).observe(submit_elapsed.as_secs_f64());
 
         let total_cost = up_cost_total + down_cost_total;
@@ -1638,79 +1643,53 @@ impl ArbEngine {
               up_orders_ok, up_signals.len(), up_tokens_total, up_cost_total,
               down_orders_ok, down_signals.len(), down_tokens_total, down_cost_total);
 
-        if up_orders_ok > 0 && down_orders_ok > 0 {
-            info!("   🎯 ARB FILLED: ${:.2} deployed, {:.0} pairs, expected profit ${:.2}",
-                  total_cost, min_tokens, expected_profit);
+        if up_orders_ok > 0 || down_orders_ok > 0 {
+            if up_orders_ok > 0 && down_orders_ok > 0 {
+                info!("   🎯 ARB FILLED: ${:.2} deployed, {:.0} pairs, expected profit ${:.2}",
+                      total_cost, min_tokens, expected_profit);
+            } else {
+                warn!("   ⚠️  PARTIAL FILL: Up={} Down={} — will balance on next opportunity",
+                      up_orders_ok, down_orders_ok);
+            }
             metrics::ARB_OPPORTUNITIES_EXECUTED.with_label_values(&[asset_lbl]).inc();
 
             self.capital_usdc -= total_cost;
 
-            // Track position IMMEDIATELY (before merge) so the event loop isn't blocked.
-            // The merge runs as a background task and reports back via merge_tx channel.
-            self.positions.push(CyclePosition {
-                market: market.clone(),
-                up_tokens_bought: up_tokens_total,
-                down_tokens_bought: down_tokens_total,
-                up_cost_usdc: up_cost_total,
-                down_cost_usdc: down_cost_total,
-                total_cost,
-                expected_profit,
-                entered_at: chrono::Utc::now(),
-                redeemed: false,
-            });
-
-            // SPAWN BACKGROUND MERGE: don't block the event loop!
-            // The merge (5s settle + balance check + tx + 120s confirmation) runs independently.
-            // Results are sent back via merge_tx channel → processed in handle_merge_result.
-            let api_pairs = min_tokens.floor();
-            if api_pairs >= 1.0 {
-                let merge_tx = self.merge_tx.clone();
-                let config = self.config.clone();
-                let event_slug = market.event_slug.clone();
-                let condition_id = market.condition_id.clone();
-                let up_token_id = market.up_token_id.clone();
-                let down_token_id = market.down_token_id.clone();
-                let executor = self.executor.clone();
-
-                tokio::spawn(async move {
-                    info!("   🔄 [BG] Waiting 5s for CLOB settlement before merge...");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
-                    // Run the merge in the background
-                    let result = run_background_merge(
-                        &config, &condition_id, &up_token_id, &down_token_id,
-                        api_pairs, up_tokens_total, down_tokens_total,
-                        up_cost_total, down_cost_total, total_cost,
-                        &event_slug, &executor,
-                    ).await;
-                    let _ = merge_tx.send(result).await;
+            // ACCUMULATE into existing position or create new one.
+            // Merge is DEFERRED until the entry window closes — we keep buying
+            // as long as spreads are favorable, just like account88888.
+            if let Some(pos) = self.positions.iter_mut().find(|p| p.market.event_slug == market.event_slug && !p.redeemed) {
+                // Accumulate into existing position
+                pos.up_tokens_bought += up_tokens_total;
+                pos.down_tokens_bought += down_tokens_total;
+                pos.up_cost_usdc += up_cost_total;
+                pos.down_cost_usdc += down_cost_total;
+                pos.total_cost += total_cost;
+                let new_min = pos.up_tokens_bought.min(pos.down_tokens_bought);
+                pos.expected_profit = new_min - pos.total_cost;
+                info!("   📦 ACCUMULATED: total {:.0} Up + {:.0} Down ({:.0} pairs) | ${:.2} deployed",
+                      pos.up_tokens_bought, pos.down_tokens_bought, new_min, pos.total_cost);
+            } else {
+                // First entry — create new position
+                self.positions.push(CyclePosition {
+                    market: market.clone(),
+                    up_tokens_bought: up_tokens_total,
+                    down_tokens_bought: down_tokens_total,
+                    up_cost_usdc: up_cost_total,
+                    down_cost_usdc: down_cost_total,
+                    total_cost,
+                    expected_profit,
+                    entered_at: chrono::Utc::now(),
+                    redeemed: false,
                 });
-
-                info!("   📤 Merge spawned as background task — event loop free");
-                return true; // Background task spawned — don't clear executing_slugs
             }
-        } else if up_orders_ok > 0 || down_orders_ok > 0 {
-            warn!("   ⚠️  PARTIAL ENTRY: Up={} Down={} — one-sided risk!",
-                  up_orders_ok, down_orders_ok);
 
-            // Still track it so we can redeem whatever we got
-            self.capital_usdc -= total_cost;
-            self.positions.push(CyclePosition {
-                market: market.clone(),
-                up_tokens_bought: up_tokens_total,
-                down_tokens_bought: down_tokens_total,
-                up_cost_usdc: up_cost_total,
-                down_cost_usdc: down_cost_total,
-                total_cost,
-                expected_profit: 0.0, // Unknown — one-sided
-                entered_at: chrono::Utc::now(),
-                redeemed: false,
-            });
+            // NOTE: Merge is NOT triggered here. It happens in check_and_redeem()
+            // once the entry window has closed. This allows continuous accumulation
+            // throughout the market window, matching account88888's strategy.
         } else {
             error!("   ❌ ALL ORDERS FAILED — no position entered");
         }
-
-        false // No background task spawned
     }
 
     // -----------------------------------------------------------------------
@@ -1719,9 +1698,10 @@ impl ArbEngine {
 
     /// Check all tracked positions and recover capital.
     ///
-    /// Strategy:
-    /// 1. For positions with both sides: try merge immediately (no resolution needed)
-    /// 2. For positions after market close: try redeem (post-resolution fallback)
+    /// DEFERRED MERGE STRATEGY (matching account88888):
+    /// - During entry window: do NOT merge — keep accumulating pairs
+    /// - After entry window closes: merge all accumulated pairs at once
+    /// - After market resolution: redeem (fallback for one-sided positions)
     async fn check_and_redeem(&mut self) {
         let now = chrono::Utc::now().timestamp();
 
@@ -1744,10 +1724,22 @@ impl ArbEngine {
             let down_cost = self.positions[i].down_cost_usdc;
             let min_tokens = up_bought.min(down_bought);
 
-            // Strategy 1: Spawn background merge (works anytime, both sides needed)
+            // Check if we're still in the entry window — if so, keep accumulating, don't merge yet.
+            let entry_window = ((market.event_end_ts - market.event_start_ts) as f64 * ENTRY_WINDOW_FRACTION) as i64;
+            let entry_deadline = market.event_start_ts + entry_window;
+            let still_in_entry_window = now <= entry_deadline;
+
+            if still_in_entry_window {
+                // Still accumulating — don't merge yet.
+                // Log position status periodically (handled by status_interval).
+                continue;
+            }
+
+            // Entry window closed — merge all accumulated pairs at once.
             if min_tokens >= 1.0 {
                 let api_pairs = min_tokens.floor();
-                info!("🔄 Spawning background merge for {}: {:.0} pairs", market.title, api_pairs);
+                info!("🔄 Entry window closed — merging {:.0} pairs for {} (${:.2} deployed)",
+                      api_pairs, market.title, total_cost);
 
                 // Mark as executing to prevent duplicate spawns on next tick
                 self.executing_slugs.insert(market.event_slug.clone());
@@ -1761,6 +1753,8 @@ impl ArbEngine {
                 let down_token_id = market.down_token_id.clone();
 
                 tokio::spawn(async move {
+                    // Brief settle delay for last CLOB orders to clear
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     let result = run_background_merge(
                         &config, &condition_id, &up_token_id, &down_token_id,
                         api_pairs, up_bought, down_bought,
@@ -2157,6 +2151,88 @@ impl ArbEngine {
     fn deployed_capital(&self) -> f64 {
         self.positions.iter().map(|p| p.total_cost).sum()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel order submission helper
+// ---------------------------------------------------------------------------
+
+/// Submit one side's (Up or Down) signed orders in batches of 15.
+/// Returns (orders_ok, tokens_total, cost_total).
+/// Defined as a standalone async fn so it can be called from tokio::join!
+/// without async closure lifetime issues.
+async fn submit_order_side(
+    executor: &OrderExecutor,
+    orders: Vec<PreparedOrder>,
+    side_label: &str,
+) -> (u32, f64, f64) {
+    use rust_decimal::prelude::ToPrimitive;
+
+    const BATCH_LIMIT: usize = 15;
+    const INTER_BATCH_DELAY_MS: u64 = 20;
+
+    let mut orders_ok = 0u32;
+    let mut tokens_total = 0.0_f64;
+    let mut cost_total = 0.0_f64;
+
+    for (batch_idx, chunk) in orders.chunks(BATCH_LIMIT).enumerate() {
+        if batch_idx > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(INTER_BATCH_DELAY_MS)).await;
+        }
+
+        let batch_orders: Vec<PreparedOrder> = chunk.to_vec();
+        let results = executor.submit_orders_batch(&batch_orders).await;
+
+        for (k, result) in results.into_iter().enumerate() {
+            if k >= chunk.len() { break; }
+            let requested_size = chunk[k].size.to_f64().unwrap_or(0.0);
+            let requested_price = chunk[k].price.to_f64().unwrap_or(0.0);
+
+            match result {
+                Ok(fill) => {
+                    let actual_tokens = fill.tokens_filled();
+                    let actual_cost = fill.usdc_amount();
+
+                    let is_delayed = fill.status == "DELAYED";
+                    let tokens = if actual_tokens > 0.0 {
+                        actual_tokens
+                    } else if is_delayed {
+                        warn!("   ⏳ {} #{}: DELAYED — using requested size {:.0} as estimate",
+                              side_label, k + 1, requested_size);
+                        requested_size
+                    } else {
+                        0.0
+                    };
+                    let cost = if actual_cost > 0.0 {
+                        actual_cost
+                    } else if is_delayed {
+                        requested_size * requested_price
+                    } else {
+                        0.0
+                    };
+
+                    orders_ok += 1;
+                    tokens_total += tokens;
+                    cost_total += cost;
+
+                    if actual_tokens > 0.0 && actual_tokens < requested_size * 0.99 {
+                        info!("   ✅ {} #{}: {:.1}/{:.0} tokens @ {:.3} (partial fill) → {} [{}]",
+                              side_label, k + 1, actual_tokens, requested_size,
+                              requested_price, fill.order_id, fill.status);
+                    } else {
+                        info!("   ✅ {} #{}: {:.0} tokens @ {:.3} → {} [{}]",
+                              side_label, k + 1, tokens, requested_price,
+                              fill.order_id, fill.status);
+                    }
+                }
+                Err(ref e) => {
+                    warn!("   ❌ {} #{} failed: {}", side_label, k + 1, e);
+                }
+            }
+        }
+    }
+
+    (orders_ok, tokens_total, cost_total)
 }
 
 // ---------------------------------------------------------------------------
@@ -2570,11 +2646,16 @@ async fn run_background_merge(
     let excess_down = down_tokens_total - pairs_to_merge;
 
     let (profit, excess_position) = if excess_up > 1.0 || excess_down > 1.0 {
-        let excess_cost = if up_tokens_total > down_tokens_total {
+        // Pro-rata cost allocation for BOTH sides' excess tokens.
+        // Old code only computed one side, which was wrong when both sides had excess
+        // (e.g., when on-chain balance limited the merge below min(up, down)).
+        let excess_up_cost = if excess_up > 0.0 && up_tokens_total > 0.0 {
             up_cost_total * (excess_up / up_tokens_total)
-        } else {
+        } else { 0.0 };
+        let excess_down_cost = if excess_down > 0.0 && down_tokens_total > 0.0 {
             down_cost_total * (excess_down / down_tokens_total)
-        };
+        } else { 0.0 };
+        let excess_cost = excess_up_cost + excess_down_cost;
         let merged_cost = total_cost - excess_cost;
         let profit = merge_revenue - merged_cost;
 
@@ -2595,8 +2676,8 @@ async fn run_background_merge(
             },
             up_tokens_bought: excess_up,
             down_tokens_bought: excess_down,
-            up_cost_usdc: if excess_up > 0.0 { up_cost_total * (excess_up / up_tokens_total) } else { 0.0 },
-            down_cost_usdc: if excess_down > 0.0 { down_cost_total * (excess_down / down_tokens_total) } else { 0.0 },
+            up_cost_usdc: excess_up_cost,
+            down_cost_usdc: excess_down_cost,
             total_cost: excess_cost,
             expected_profit: 0.0,
             entered_at: chrono::Utc::now(),
@@ -2842,10 +2923,10 @@ async fn dispatch_single_ws_message(
 
         "price_change" => {
             // Price change events contain best_bid/best_ask but NOT full depth.
-            // We construct a minimal TokenBook with a single ask level so the engine's
-            // book cache stays up-to-date. When a real arb opportunity is detected,
-            // the execution path uses FOK orders that will fill or cancel, so stale
-            // depth is safe — we just need accurate best_ask for spread detection.
+            // We send a PriceUpdate event so the engine can update ONLY the top-of-book
+            // without destroying the full depth from previous "book" snapshots.
+            // This is critical for continuous accumulation — we need real depth data
+            // from "book" events to sweep multiple levels accurately.
 
             if let Some(changes) = msg.get("price_changes").and_then(|v| v.as_array()) {
                 for change in changes {
@@ -2862,19 +2943,11 @@ async fn dispatch_single_ws_message(
                     trace!("📊 price_change: {}... bid={:.2} ask={:.2}",
                            &asset_id[..16.min(asset_id.len())], best_bid, best_ask);
 
-                    // Build a minimal TokenBook from price_change so the engine cache
-                    // stays current. Use a nominal depth of 100 tokens — the real depth
-                    // doesn't matter for spread detection, and FOK orders handle the rest.
                     if best_ask > 0.0 && best_ask < 1.0 {
-                        let book = TokenBook {
+                        let _ = event_tx.send(ArbWsEvent::PriceUpdate {
+                            asset_id: asset_id.clone(),
                             best_bid,
                             best_ask,
-                            ask_levels: vec![BookLevel { price: best_ask, size: 100.0 }],
-                            total_ask_depth: 100.0,
-                        };
-                        let _ = event_tx.send(ArbWsEvent::BookSnapshot {
-                            asset_id: asset_id.clone(),
-                            book,
                         }).await;
                     }
                 }

@@ -51,6 +51,10 @@ const PRE_MARKET_LEAD_SECS: i64 = 300; // 5 minutes before
 /// Seconds after market start to stop trying to enter (prices converge).
 const ENTRY_WINDOW_SECS: i64 = 1800; // first 30 minutes of the hour
 
+/// Series slugs we target.
+const BTC_HOURLY_SERIES: &str = "btc-up-or-down-hourly";
+const ETH_HOURLY_SERIES: &str = "eth-up-or-down-hourly";
+
 /// CLOB WebSocket market channel URL (public, no auth needed).
 /// Docs: https://docs.polymarket.com/developers/CLOB/websocket/market-channel
 const CLOB_WS_MARKET_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -733,50 +737,71 @@ impl ArbEngine {
     /// Scan Gamma API for active BTC/ETH Up/Down hourly events.
     ///
     /// Uses a 2-step approach:
-    /// 1. GET /events (no closed filter) → discover event IDs by title match
-    /// 2. GET /events/{id} for each match → get full market data with clobTokenIds
+    /// 1. GET /series?slug=X&active=true → discover event IDs (finds ALL events in the series)
+    /// 2. GET /events/{id} for each → get full market data with clobTokenIds
     ///
-    /// We do NOT use closed=false because Polymarket marks hourly events as
-    /// closed=true once they start, even though markets inside are still trading.
+    /// We do NOT filter by `closed` on stubs because Polymarket marks hourly events
+    /// as closed=true once they start, even though markets inside are still trading.
     /// We rely on per-market `acceptingOrders` and duration filtering instead.
     async fn scan_markets(&self) -> Result<Vec<ArbMarket>, String> {
-        // Step 1: Discover matching event IDs from the newest events.
-        // The list endpoint returns lightweight stubs (no clobTokenIds in markets).
-        let url = "https://gamma-api.polymarket.com/events?order=id&ascending=false&limit=200";
+        let mut all_markets = Vec::new();
 
-        let resp = self.client.get(url).send().await
-            .map_err(|e| format!("Events HTTP error: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("Events API returned {}", resp.status()));
+        for (series, asset) in [
+            (BTC_HOURLY_SERIES, ArbAsset::BTC),
+            (ETH_HOURLY_SERIES, ArbAsset::ETH),
+        ] {
+            match self.fetch_series_events(series, asset).await {
+                Ok(mut m) => all_markets.append(&mut m),
+                Err(e) => warn!("Failed to fetch {} events: {}", series, e),
+            }
         }
 
-        let events: Vec<serde_json::Value> = resp.json().await
-            .map_err(|e| format!("Events JSON parse error: {}", e))?;
+        info!("📡 scan_markets: {} tradeable 1hr markets found", all_markets.len());
+        Ok(all_markets)
+    }
+
+    /// Fetch active events for a given series from Gamma API.
+    ///
+    /// Step 1: GET /series?slug=X&active=true → lightweight event stubs (no clobTokenIds)
+    /// Step 2: GET /events/{id} for each non-expired event → full market data
+    async fn fetch_series_events(&self, series_slug: &str, asset: ArbAsset) -> Result<Vec<ArbMarket>, String> {
+        let series_url = format!(
+            "https://gamma-api.polymarket.com/series?slug={}&active=true",
+            series_slug
+        );
+
+        let resp = self.client.get(&series_url).send().await
+            .map_err(|e| format!("Series HTTP error: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Series API returned {}", resp.status()));
+        }
+
+        let series_list: Vec<serde_json::Value> = resp.json().await
+            .map_err(|e| format!("Series JSON parse error: {}", e))?;
+
+        let series = match series_list.first() {
+            Some(s) => s,
+            None => return Err(format!("No series found for slug: {}", series_slug)),
+        };
+
+        let events = match series.get("events").and_then(|v| v.as_array()) {
+            Some(e) => e,
+            None => return Ok(Vec::new()),
+        };
 
         let now = chrono::Utc::now().timestamp();
 
-        // Collect matching event IDs + asset type, filtering by title and endDate
-        let mut candidates: Vec<(String, ArbAsset)> = Vec::new();
+        // Collect event IDs — do NOT filter by closed boolean.
+        // Only skip events whose endDate is clearly in the past.
+        let mut candidates: Vec<(String, i64)> = Vec::new();
 
-        for event in &events {
-            let title = event.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            let title_lower = title.to_lowercase();
-
-            let asset = if title_lower.contains("bitcoin up or down") {
-                ArbAsset::BTC
-            } else if title_lower.contains("ethereum up or down") {
-                ArbAsset::ETH
-            } else {
-                continue;
-            };
-
-            // Quick endDate check on the stub to avoid fetching clearly-expired events
+        for event in events {
             let end_str = event.get("endDate").and_then(|v| v.as_str()).unwrap_or("");
             if !end_str.is_empty() {
                 if let Ok(end_dt) = chrono::DateTime::parse_from_rfc3339(end_str) {
                     if end_dt.timestamp() < now - 300 {
-                        continue;
+                        continue; // Ended > 5 min ago
                     }
                 }
             }
@@ -789,35 +814,46 @@ impl ArbEngine {
                 continue;
             };
 
-            candidates.push((id_str, asset));
+            let start_str = event.get("startDate")
+                .or_else(|| event.get("startTime"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let start_ts = chrono::DateTime::parse_from_rfc3339(start_str)
+                .map(|dt| dt.timestamp())
+                .unwrap_or(i64::MAX);
+
+            candidates.push((id_str, start_ts));
         }
 
-        if candidates.is_empty() {
-            info!("📡 scan_markets: 0 BTC/ETH hourly events found in {} total events", events.len());
+        // Sort by proximity to now: currently active first, then upcoming
+        candidates.sort_by_key(|(_, start_ts)| (*start_ts - now).abs());
+        // Take top 24 events (covers a full day of hourly markets)
+        let event_ids: Vec<String> = candidates.into_iter()
+            .take(24)
+            .map(|(id, _)| id)
+            .collect();
+
+        if event_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        info!("📡 scan_markets: {} candidate events from {} total, fetching full details...",
-              candidates.len(), events.len());
+        info!("📡 {}: {} candidate events, fetching full details...", series_slug, event_ids.len());
 
         // Step 2: Fetch full event details concurrently.
-        // Individual /events/{id} responses include nested markets[] with clobTokenIds.
-        let futures: Vec<_> = candidates.iter().map(|(event_id, asset)| {
+        let futures: Vec<_> = event_ids.iter().map(|event_id| {
             let url = format!("https://gamma-api.polymarket.com/events/{}", event_id);
             let client = self.client.clone();
-            let asset = *asset;
             async move {
                 let resp = client.get(&url).send().await.ok()?;
                 if !resp.status().is_success() { return None; }
-                let event: serde_json::Value = resp.json().await.ok()?;
-                Some((event, asset))
+                resp.json::<serde_json::Value>().await.ok()
             }
         }).collect();
 
         let results = futures_util::future::join_all(futures).await;
 
         let mut markets = Vec::new();
-        for (event, asset) in results.into_iter().flatten() {
+        for event in results.into_iter().flatten() {
             let event_markets = match event.get("markets").and_then(|m| m.as_array()) {
                 Some(m) => m,
                 None => continue,
@@ -852,7 +888,6 @@ impl ArbEngine {
             }
         }
 
-        info!("📡 scan_markets: {} tradeable 1hr markets found", markets.len());
         Ok(markets)
     }
 

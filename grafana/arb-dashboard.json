@@ -305,7 +305,9 @@
       "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"btc\"}", "legendFormat": "BTC Spread %", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"eth\"}", "legendFormat": "ETH Spread %", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"eth\"}", "legendFormat": "ETH Spread %", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"sol\"}", "legendFormat": "SOL Spread %", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"xrp\"}", "legendFormat": "XRP Spread %", "refId": "D" }
       ],
       "title": "Arb Spread % (1 - pair_cost)",
       "type": "timeseries"
@@ -328,7 +330,9 @@
       "options": { "legend": { "calcs": ["lastNotNull", "mean", "min"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"btc\"}", "legendFormat": "BTC Pair Cost", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"eth\"}", "legendFormat": "ETH Pair Cost", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"eth\"}", "legendFormat": "ETH Pair Cost", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"sol\"}", "legendFormat": "SOL Pair Cost", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"xrp\"}", "legendFormat": "XRP Pair Cost", "refId": "D" }
       ],
       "title": "Best Pair Cost (Up Ask + Down Ask)",
       "type": "timeseries"
@@ -347,7 +351,9 @@
       "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
       "targets": [
         { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"btc\"}", "legendFormat": "BTC Pairs", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"eth\"}", "legendFormat": "ETH Pairs", "refId": "B" }
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"eth\"}", "legendFormat": "ETH Pairs", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"sol\"}", "legendFormat": "SOL Pairs", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"xrp\"}", "legendFormat": "XRP Pairs", "refId": "D" }
       ],
       "title": "Available Profitable Pairs",
       "type": "timeseries"
@@ -368,7 +374,11 @@
         { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"btc\",side=\"up\"}", "legendFormat": "BTC Up Depth", "refId": "A" },
         { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"btc\",side=\"down\"}", "legendFormat": "BTC Down Depth", "refId": "B" },
         { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"eth\",side=\"up\"}", "legendFormat": "ETH Up Depth", "refId": "C" },
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"eth\",side=\"down\"}", "legendFormat": "ETH Down Depth", "refId": "D" }
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"eth\",side=\"down\"}", "legendFormat": "ETH Down Depth", "refId": "D" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"sol\",side=\"up\"}", "legendFormat": "SOL Up Depth", "refId": "E" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"sol\",side=\"down\"}", "legendFormat": "SOL Down Depth", "refId": "F" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"xrp\",side=\"up\"}", "legendFormat": "XRP Up Depth", "refId": "G" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"xrp\",side=\"down\"}", "legendFormat": "XRP Down Depth", "refId": "H" }
       ],
       "title": "Order Book Ask Depth",
       "type": "timeseries"

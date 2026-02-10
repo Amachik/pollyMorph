@@ -48,12 +48,19 @@ const MARKET_SCAN_INTERVAL_SECS: u64 = 30;
 /// Seconds before market start to begin scanning the book.
 const PRE_MARKET_LEAD_SECS: i64 = 300; // 5 minutes before
 
-/// Seconds after market start to stop trying to enter (prices converge).
-const ENTRY_WINDOW_SECS: i64 = 1800; // first 30 minutes of the hour
+/// Fraction of market duration after start during which we'll attempt entry.
+/// 0.5 = first half of the window (30 min for 1hr, 7.5 min for 15m).
+const ENTRY_WINDOW_FRACTION: f64 = 0.5;
 
 /// Series slugs we target.
 const BTC_HOURLY_SERIES: &str = "btc-up-or-down-hourly";
 const ETH_HOURLY_SERIES: &str = "eth-up-or-down-hourly";
+const SOL_HOURLY_SERIES: &str = "solana-up-or-down-hourly";
+const XRP_HOURLY_SERIES: &str = "xrp-up-or-down-hourly";
+const BTC_15M_SERIES: &str = "btc-up-or-down-15m";
+const ETH_15M_SERIES: &str = "eth-up-or-down-15m";
+const SOL_15M_SERIES: &str = "sol-up-or-down-15m";
+const XRP_15M_SERIES: &str = "xrp-up-or-down-15m";
 
 /// CLOB WebSocket market channel URL (public, no auth needed).
 /// Docs: https://docs.polymarket.com/developers/CLOB/websocket/market-channel
@@ -63,7 +70,7 @@ const CLOB_WS_MARKET_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/
 const WS_PING_INTERVAL_SECS: u64 = 10;
 
 /// Channel buffer size for WS → engine communication.
-const WS_CHANNEL_BUFFER: usize = 256;
+const WS_CHANNEL_BUFFER: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -102,11 +109,18 @@ pub struct ArbMarket {
 pub enum ArbAsset {
     BTC,
     ETH,
+    SOL,
+    XRP,
 }
 
 impl ArbAsset {
     fn label(&self) -> &'static str {
-        match self { ArbAsset::BTC => "btc", ArbAsset::ETH => "eth" }
+        match self {
+            ArbAsset::BTC => "btc",
+            ArbAsset::ETH => "eth",
+            ArbAsset::SOL => "sol",
+            ArbAsset::XRP => "xrp",
+        }
     }
 }
 
@@ -330,7 +344,7 @@ impl ArbEngine {
         info!("🎯 ARB ENGINE STARTED — Capital: ${:.2}, Max/cycle: ${:.2}",
               self.capital_usdc, self.max_per_cycle);
         info!("   Strategy: Buy both Up+Down when spread > {:.0}%", (1.0 - MAX_PAIR_COST) * 100.0);
-        info!("   Targets: BTC hourly, ETH hourly (real-time WebSocket + 30s REST discovery)");
+        info!("   Targets: BTC/ETH/SOL/XRP × 1hr+15m (real-time WebSocket + {}s REST discovery)", MARKET_SCAN_INTERVAL_SECS);
 
         // Market discovery timer — REST poll Gamma API for new events
         let mut scan_interval = tokio::time::interval(
@@ -466,7 +480,8 @@ impl ArbEngine {
         if now < market.event_start_ts - PRE_MARKET_LEAD_SECS {
             return; // Too early
         }
-        if now > market.event_start_ts + ENTRY_WINDOW_SECS {
+        let entry_window = ((market.event_end_ts - market.event_start_ts) as f64 * ENTRY_WINDOW_FRACTION) as i64;
+        if now > market.event_start_ts + entry_window {
             return; // Too late
         }
 
@@ -685,7 +700,8 @@ impl ArbEngine {
         for market in markets {
             if self.has_position(&market.event_slug) { continue; }
             if now < market.event_start_ts - PRE_MARKET_LEAD_SECS { continue; }
-            if now > market.event_start_ts + ENTRY_WINDOW_SECS { continue; }
+            let entry_window = ((market.event_end_ts - market.event_start_ts) as f64 * ENTRY_WINDOW_FRACTION) as i64;
+            if now > market.event_start_ts + entry_window { continue; }
 
             // Skip if execution already in progress
             if self.executing_slugs.contains(&market.event_slug) { continue; }
@@ -734,7 +750,7 @@ impl ArbEngine {
     // Market scanning
     // -----------------------------------------------------------------------
 
-    /// Scan Gamma API for active BTC/ETH Up/Down hourly events.
+    /// Scan Gamma API for active Up/Down events across all target series.
     ///
     /// Uses a 2-step approach:
     /// 1. GET /series?slug=X&active=true → discover event IDs (finds ALL events in the series)
@@ -749,6 +765,12 @@ impl ArbEngine {
         for (series, asset) in [
             (BTC_HOURLY_SERIES, ArbAsset::BTC),
             (ETH_HOURLY_SERIES, ArbAsset::ETH),
+            (SOL_HOURLY_SERIES, ArbAsset::SOL),
+            (XRP_HOURLY_SERIES, ArbAsset::XRP),
+            (BTC_15M_SERIES, ArbAsset::BTC),
+            (ETH_15M_SERIES, ArbAsset::ETH),
+            (SOL_15M_SERIES, ArbAsset::SOL),
+            (XRP_15M_SERIES, ArbAsset::XRP),
         ] {
             match self.fetch_series_events(series, asset).await {
                 Ok(mut m) => all_markets.append(&mut m),
@@ -756,7 +778,7 @@ impl ArbEngine {
             }
         }
 
-        info!("📡 scan_markets: {} tradeable 1hr markets found", all_markets.len());
+        info!("📡 scan_markets: {} tradeable markets found (1hr + 15m, BTC/ETH/SOL/XRP)", all_markets.len());
         Ok(all_markets)
     }
 
@@ -828,9 +850,9 @@ impl ArbEngine {
 
         // Sort by endDate ascending: soonest-ending (currently active) first
         candidates.sort_by_key(|(_, end_ts)| *end_ts);
-        // Take top 24 events (covers a full day of hourly markets)
+        // Take top 96 events (covers a full day of 15-min markets, or 24 hourly)
         let event_ids: Vec<String> = candidates.into_iter()
-            .take(24)
+            .take(96)
             .map(|(id, _)| id)
             .collect();
 
@@ -871,10 +893,12 @@ impl ArbEngine {
                     continue;
                 }
 
-                // Only target ~1-hour window markets (3600s ± 900s tolerance).
-                // This excludes 15-minute windows (900s) and 4-hour windows (14400s).
+                // Accept ~15-minute windows (900s ± 300s) and ~1-hour windows (3600s ± 900s).
+                // This excludes 4-hour windows (14400s) and other unusual durations.
                 let duration = arb.event_end_ts - arb.event_start_ts;
-                if duration < 2700 || duration > 4500 {
+                let is_15m = duration >= 600 && duration <= 1200;
+                let is_1hr = duration >= 2700 && duration <= 4500;
+                if !is_15m && !is_1hr {
                     continue;
                 }
 

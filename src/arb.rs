@@ -787,7 +787,9 @@ impl ArbEngine {
         };
 
         let now = chrono::Utc::now().timestamp();
-        let mut event_ids: Vec<String> = Vec::new();
+
+        // Collect all eligible events with their start times for sorting
+        let mut candidates: Vec<(String, i64)> = Vec::new();
 
         for event in events {
             let closed = event.get("closed").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -803,17 +805,34 @@ impl ArbEngine {
                 }
             }
 
-            if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
-                event_ids.push(id.to_string());
+            let id_str = if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                id.to_string()
             } else if let Some(id) = event.get("id").and_then(|v| v.as_u64()) {
-                event_ids.push(id.to_string());
-            }
+                id.to_string()
+            } else {
+                continue;
+            };
 
-            // Cap at 10 events max — hourly markets only have ~24-48 active at once
-            if event_ids.len() >= 10 {
-                break;
-            }
+            // Parse start time for sorting (prioritize markets closest to now)
+            let start_str = event.get("startDate")
+                .or_else(|| event.get("startTime"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let start_ts = chrono::DateTime::parse_from_rfc3339(start_str)
+                .map(|dt| dt.timestamp())
+                .unwrap_or(i64::MAX);
+
+            candidates.push((id_str, start_ts));
         }
+
+        // Sort by proximity to now: currently active first, then upcoming, then far future
+        candidates.sort_by_key(|(_, start_ts)| (*start_ts - now).abs());
+
+        // Take top 24 events (covers a full day of hourly markets)
+        let event_ids: Vec<String> = candidates.into_iter()
+            .take(24)
+            .map(|(id, _)| id)
+            .collect();
 
         if event_ids.is_empty() {
             return Ok(Vec::new());
@@ -2786,11 +2805,10 @@ async fn dispatch_single_ws_message(
 
         "price_change" => {
             // Price change events contain best_bid/best_ask but NOT full depth.
-            // We could use these for quick filtering, but for arb we need full depth
-            // to calculate exact pair costs across all levels.
-            // The "book" event already fires on every trade, so we rely on that.
-            // However, price_change fires on order PLACEMENT/CANCELLATION too,
-            // which "book" events don't cover. We parse these into partial book updates.
+            // We construct a minimal TokenBook with a single ask level so the engine's
+            // book cache stays up-to-date. When a real arb opportunity is detected,
+            // the execution path uses FOK orders that will fill or cancel, so stale
+            // depth is safe — we just need accurate best_ask for spread detection.
 
             if let Some(changes) = msg.get("price_changes").and_then(|v| v.as_array()) {
                 for change in changes {
@@ -2799,9 +2817,6 @@ async fn dispatch_single_ws_message(
                         None => continue,
                     };
 
-                    // price_change only gives best_bid/best_ask + the changed level,
-                    // not the full book. We can't build a complete TokenBook from this.
-                    // Log it for debugging but rely on "book" events for full depth.
                     let best_bid = change.get("best_bid").and_then(|v| v.as_str())
                         .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                     let best_ask = change.get("best_ask").and_then(|v| v.as_str())
@@ -2809,6 +2824,22 @@ async fn dispatch_single_ws_message(
 
                     debug!("📊 price_change: {}... bid={:.2} ask={:.2}",
                            &asset_id[..16.min(asset_id.len())], best_bid, best_ask);
+
+                    // Build a minimal TokenBook from price_change so the engine cache
+                    // stays current. Use a nominal depth of 100 tokens — the real depth
+                    // doesn't matter for spread detection, and FOK orders handle the rest.
+                    if best_ask > 0.0 && best_ask < 1.0 {
+                        let book = TokenBook {
+                            best_bid,
+                            best_ask,
+                            ask_levels: vec![BookLevel { price: best_ask, size: 100.0 }],
+                            total_ask_depth: 100.0,
+                        };
+                        let _ = event_tx.send(ArbWsEvent::BookSnapshot {
+                            asset_id: asset_id.clone(),
+                            book,
+                        }).await;
+                    }
                 }
             }
         }

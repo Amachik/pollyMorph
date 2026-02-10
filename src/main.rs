@@ -170,6 +170,12 @@ async fn main() -> anyhow::Result<()> {
     if is_arb_mode {
         info!("🎯 Starting Arb Engine...");
 
+        // Start Prometheus metrics server (must run alongside arb engine)
+        tokio::spawn(async move {
+            let metrics_server = MetricsServer::new(9090);
+            metrics_server.run().await;
+        });
+
         // Check USDC balance and allowance
         let capital = match executor.check_and_set_capital_from_balance().await {
             Ok(raw) => {

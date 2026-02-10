@@ -25,6 +25,36 @@ use tracing::{debug, error, info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Result from a batch order submission, containing actual fill amounts.
+/// CRITICAL: For FAK orders, actual fill can be less than requested.
+/// Always use these amounts for merge/position calculations, never the requested size.
+#[derive(Debug, Clone)]
+pub struct BatchFillResult {
+    pub order_id: String,
+    /// Actual tokens received (for BUY) or tokens sold (for SELL), in raw 6-decimal units.
+    /// Parse from OrderResponse.takingAmount. "0" if not filled.
+    pub taking_amount_raw: u64,
+    /// Actual USDC paid (for BUY) or USDC received (for SELL), in raw 6-decimal units.
+    /// Parse from OrderResponse.makingAmount. "0" if not filled.
+    pub making_amount_raw: u64,
+    /// Order status from the API: "MATCHED", "DELAYED", "UNMATCHED", etc.
+    pub status: String,
+}
+
+impl BatchFillResult {
+    /// Actual tokens filled, converted from raw 6-decimal units to human-readable.
+    /// For BUY orders: this is tokens received.
+    pub fn tokens_filled(&self) -> f64 {
+        self.taking_amount_raw as f64 / 1_000_000.0
+    }
+
+    /// Actual USDC spent/received, converted from raw 6-decimal units to human-readable.
+    /// For BUY orders: this is USDC spent.
+    pub fn usdc_amount(&self) -> f64 {
+        self.making_amount_raw as f64 / 1_000_000.0
+    }
+}
+
 /// Order executor with connection pooling and pre-signing
 /// 
 /// PERF: #[repr(align(64))] ensures struct starts on cache line boundary
@@ -432,7 +462,7 @@ impl OrderExecutor {
         let order_type_str = match order.order_type {
             OrderType::Limit => "GTC",
             OrderType::FillOrKill => "FOK",
-            OrderType::ImmediateOrCancel => "FOK", // Polymarket uses FOK for IOC-like
+            OrderType::ImmediateOrCancel => "FAK",
             _ => "GTC",
         };
 
@@ -527,6 +557,207 @@ impl OrderExecutor {
         Ok(order_id)
     }
     
+    /// Submit multiple orders in a single batch request via POST /orders.
+    /// Polymarket supports up to 15 orders per batch.
+    /// Returns a Vec of Result<BatchFillResult> with actual fill amounts from the API.
+    /// CRITICAL: For FAK orders, the actual fill can be less than requested.
+    /// Always use the returned takingAmount/makingAmount, never the requested size.
+    pub async fn submit_orders_batch(
+        &self,
+        orders: &[PreparedOrder],
+    ) -> Vec<Result<BatchFillResult, ExecutionError>> {
+        if orders.is_empty() {
+            return Vec::new();
+        }
+
+        // Polymarket batch limit is 15 orders per request
+        const BATCH_LIMIT: usize = 15;
+        let mut all_results = Vec::with_capacity(orders.len());
+
+        for chunk in orders.chunks(BATCH_LIMIT) {
+            let mut order_payloads = Vec::with_capacity(chunk.len());
+
+            for order in chunk {
+                let signature = match order.signature.as_ref() {
+                    Some(sig) => sig,
+                    None => {
+                        all_results.push(Err(ExecutionError::SigningFailed("No signature".to_string())));
+                        continue;
+                    }
+                };
+
+                let token_id_for_api = if order.token_id_str.is_empty() {
+                    self.token_registry.get_str(order.market_id.token_id)
+                        .unwrap_or_else(|| format!("{}", order.market_id.token_id))
+                } else {
+                    order.token_id_str.clone()
+                };
+
+                let order_type_str = match order.order_type {
+                    OrderType::Limit => "GTC",
+                    OrderType::FillOrKill => "FOK",
+                    OrderType::ImmediateOrCancel => "FAK",
+                    _ => "GTC",
+                };
+
+                order_payloads.push(serde_json::json!({
+                    "order": {
+                        "salt": order.salt,
+                        "maker": order.maker,
+                        "signer": order.signer_addr,
+                        "taker": order.taker,
+                        "tokenId": token_id_for_api,
+                        "makerAmount": order.maker_amount,
+                        "takerAmount": order.taker_amount,
+                        "expiration": order.expiration,
+                        "nonce": order.nonce.to_string(),
+                        "feeRateBps": order.fee_rate_bps,
+                        "side": match order.side {
+                            Side::Buy => "BUY",
+                            Side::Sell => "SELL",
+                        },
+                        "signatureType": order.signature_type,
+                        "signature": signature.to_hex(),
+                    },
+                    "owner": self.config.polymarket.api_key.clone(),
+                    "orderType": order_type_str,
+                    "postOnly": order.post_only,
+                }));
+            }
+
+            if order_payloads.is_empty() {
+                continue;
+            }
+
+            let path = "/orders";
+            let url = format!("{}{}", self.config.polymarket.rest_url, path);
+            let body_str = match serde_json::to_string(&order_payloads) {
+                Ok(s) => s,
+                Err(e) => {
+                    for _ in 0..order_payloads.len() {
+                        all_results.push(Err(ExecutionError::SigningFailed(e.to_string())));
+                    }
+                    continue;
+                }
+            };
+
+            let headers = match self.l2_headers("POST", path, &body_str) {
+                Ok(h) => h,
+                Err(e) => {
+                    for _ in 0..order_payloads.len() {
+                        all_results.push(Err(e.clone()));
+                    }
+                    continue;
+                }
+            };
+
+            let mut request = self.client
+                .post(&url)
+                .header("Content-Type", "application/json");
+
+            for (key, value) in &headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
+
+            let response = match request.body(body_str).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    for _ in 0..order_payloads.len() {
+                        all_results.push(Err(ExecutionError::NetworkError(e.to_string())));
+                    }
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let body_preview = if body.len() > 200 { &body[..200] } else { &body };
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if status.as_u16() == 403 {
+                    self.api_backoff_until.store(now + 10, AtomicOrdering::Relaxed);
+                    warn!("⏸️  403 from Cloudflare on batch — backing off 10s");
+                }
+
+                let err_msg = format!("{}: {}", status, body_preview);
+                for _ in 0..order_payloads.len() {
+                    all_results.push(Err(ExecutionError::ApiError(err_msg.clone())));
+                }
+                continue;
+            }
+
+            // Parse batch response — array of OrderResponse objects:
+            // { success: bool, errorMsg: string, orderID: string,
+            //   transactionsHashes: string[], status: string,
+            //   takingAmount: string, makingAmount: string }
+            let result: serde_json::Value = match response.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    for _ in 0..order_payloads.len() {
+                        all_results.push(Err(ExecutionError::ParseError(e.to_string())));
+                    }
+                    continue;
+                }
+            };
+
+            if let Some(arr) = result.as_array() {
+                for item in arr {
+                    let success = item["success"].as_bool().unwrap_or(false);
+                    if success {
+                        if let Some(order_id) = item["orderID"].as_str() {
+                            // Extract actual fill amounts from response
+                            // For BUY FAK: takingAmount = tokens received, makingAmount = USDC paid
+                            // These are in raw 6-decimal string format (e.g. "50000000" = 50 tokens)
+                            let taking_raw = item["takingAmount"].as_str()
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .unwrap_or(0);
+                            let making_raw = item["makingAmount"].as_str()
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .unwrap_or(0);
+                            let status = item["status"].as_str()
+                                .unwrap_or("UNKNOWN").to_string();
+
+                            all_results.push(Ok(BatchFillResult {
+                                order_id: order_id.to_string(),
+                                taking_amount_raw: taking_raw,
+                                making_amount_raw: making_raw,
+                                status,
+                            }));
+                        } else {
+                            all_results.push(Err(ExecutionError::ParseError(
+                                "success=true but no orderID".to_string()
+                            )));
+                        }
+                    } else {
+                        let err_msg = item["errorMsg"].as_str()
+                            .or_else(|| item["error"].as_str())
+                            .unwrap_or("Unknown order error");
+                        all_results.push(Err(ExecutionError::ApiError(err_msg.to_string())));
+                    }
+                }
+            } else {
+                // Non-array response — single error for entire batch
+                let err = result["errorMsg"].as_str()
+                    .or_else(|| result["error"].as_str())
+                    .unwrap_or("Unknown batch error");
+                for _ in 0..order_payloads.len() {
+                    all_results.push(Err(ExecutionError::ApiError(err.to_string())));
+                }
+            }
+        }
+
+        all_results
+    }
+
+    /// Get a reference to the order signer for direct batch signing.
+    pub fn signer(&self) -> &OrderSigner {
+        &self.signer
+    }
+
     /// Get signature cache statistics (hits, misses, size) for metrics reporting
     pub fn signer_cache_stats(&self) -> (u64, u64, usize) {
         self.signer.cache_stats()
@@ -1284,7 +1515,7 @@ impl OrderExecutor {
 }
 
 /// Execution error types
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ExecutionError {
     #[error("Kill switch is active")]
     KillSwitchActive,

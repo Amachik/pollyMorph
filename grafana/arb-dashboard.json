@@ -1,0 +1,750 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "panels": [],
+      "title": "💰 Capital & P&L",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 200 }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_capital_available_usdc", "refId": "A" }
+      ],
+      "title": "Available Capital",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_capital_deployed_usdc", "refId": "A" }
+      ],
+      "title": "Capital Deployed",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_total_pnl_usdc", "refId": "A" }
+      ],
+      "title": "Total P&L",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 3, "x": 12, "y": 1 },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_cycles_completed", "refId": "A" }
+      ],
+      "title": "Cycles Completed",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 3, "x": 15, "y": 1 },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_active_positions", "refId": "A" }
+      ],
+      "title": "Active Positions",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "red", "index": 0, "text": "DISCONNECTED" }, "1": { "color": "green", "index": 1, "text": "CONNECTED" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 3, "x": 18, "y": 1 },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_ws_connected", "refId": "A" }
+      ],
+      "title": "WebSocket",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 3, "x": 21, "y": 1 },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_tracked_markets", "refId": "A" }
+      ],
+      "title": "Tracked Markets",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "USDC", "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "pointSize": 5, "showPoints": "never" },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "P&L" }, "properties": [ { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } } ] },
+          { "matcher": { "id": "byName", "options": "Available" }, "properties": [ { "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } } ] },
+          { "matcher": { "id": "byName", "options": "Deployed" }, "properties": [ { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } } ] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 10,
+      "options": { "legend": { "calcs": ["lastNotNull", "min", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_total_pnl_usdc", "legendFormat": "P&L", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_capital_available_usdc", "legendFormat": "Available", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_capital_deployed_usdc", "legendFormat": "Deployed", "refId": "C" }
+      ],
+      "title": "Capital & P&L Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "USDC", "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1, "pointSize": 5, "showPoints": "never" },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 11,
+      "options": { "legend": { "calcs": ["sum", "count"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(polymorph_arb_usdc_merged_total[5m]) * 300", "legendFormat": "Merged", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(polymorph_arb_usdc_redeemed_total[5m]) * 300", "legendFormat": "Redeemed", "refId": "B" }
+      ],
+      "title": "USDC Recovered (per 5m window)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 200,
+      "panels": [],
+      "title": "📈 Spreads & Opportunities",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "%", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "pointSize": 5, "showPoints": "auto", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "transparent", "value": null }, { "color": "green", "value": 2 } ] },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 20,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"btc\"}", "legendFormat": "BTC Spread %", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_spread_pct{asset=\"eth\"}", "legendFormat": "ETH Spread %", "refId": "B" }
+      ],
+      "title": "Arb Spread % (1 - pair_cost)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "$", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "pointSize": 5, "showPoints": "auto", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "transparent", "value": null }, { "color": "red", "value": 0.98 } ] },
+          "unit": "currencyUSD",
+          "min": 0.85,
+          "max": 1.05
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 21,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "min"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"btc\"}", "legendFormat": "BTC Pair Cost", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_best_pair_cost{asset=\"eth\"}", "legendFormat": "ETH Pair Cost", "refId": "B" }
+      ],
+      "title": "Best Pair Cost (Up Ask + Down Ask)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "pairs", "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "showPoints": "auto" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "id": 22,
+      "options": { "legend": { "calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"btc\"}", "legendFormat": "BTC Pairs", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_available_pairs{asset=\"eth\"}", "legendFormat": "ETH Pairs", "refId": "B" }
+      ],
+      "title": "Available Profitable Pairs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "axisLabel": "tokens", "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "id": 23,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"btc\",side=\"up\"}", "legendFormat": "BTC Up Depth", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"btc\",side=\"down\"}", "legendFormat": "BTC Down Depth", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"eth\",side=\"up\"}", "legendFormat": "ETH Up Depth", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_book_depth_tokens{asset=\"eth\",side=\"down\"}", "legendFormat": "ETH Down Depth", "refId": "D" }
+      ],
+      "title": "Order Book Ask Depth",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 300,
+      "panels": [],
+      "title": "🚀 Execution & Fills",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 30,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_opportunities_detected_total{source=\"ws\"}[5m])", "legendFormat": "Detected (WS) {{asset}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_opportunities_detected_total{source=\"rest\"}[5m])", "legendFormat": "Detected (REST) {{asset}}", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_opportunities_executed_total[5m])", "legendFormat": "Executed {{asset}}", "refId": "C" }
+      ],
+      "title": "Opportunities: Detected vs Executed (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 31,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_opportunities_skipped_total[5m])", "legendFormat": "Skipped: {{reason}}", "refId": "A" }
+      ],
+      "title": "Opportunities Skipped by Reason (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "id": 32,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_orders_filled_total[5m])", "legendFormat": "Filled {{asset}} {{side}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_orders_failed_total[5m])", "legendFormat": "Failed {{asset}} {{side}}", "refId": "B" }
+      ],
+      "title": "Orders: Filled vs Failed (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto" },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "id": 33,
+      "options": { "legend": { "calcs": ["sum", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_usdc_spent_total{side=\"up\"}[5m])", "legendFormat": "{{asset}} Up", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_usdc_spent_total{side=\"down\"}[5m])", "legendFormat": "{{asset}} Down", "refId": "B" }
+      ],
+      "title": "USDC Spent per Side (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "id": 34,
+      "options": { "legend": { "calcs": ["sum", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_tokens_bought_total{side=\"up\"}[5m])", "legendFormat": "{{asset}} Up Tokens", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_tokens_bought_total{side=\"down\"}[5m])", "legendFormat": "{{asset}} Down Tokens", "refId": "B" }
+      ],
+      "title": "Tokens Bought per Side (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "id": 35,
+      "options": { "legend": { "calcs": ["mean", "min", "max"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_fill_rate_bucket[15m]))", "legendFormat": "Median Fill Rate", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.1, rate(polymorph_arb_fill_rate_bucket[15m]))", "legendFormat": "p10 Fill Rate", "refId": "B" }
+      ],
+      "title": "Fill Rate Distribution",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "id": 400,
+      "panels": [],
+      "title": "⛓️ On-Chain: Merge & Redeem",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": ".*success.*" }, "properties": [ { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } } ] },
+          { "matcher": { "id": "byRegexp", "options": ".*failure.*" }, "properties": [ { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } } ] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 },
+      "id": 40,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_merge_total[5m])", "legendFormat": "Merge {{outcome}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_redeem_total[5m])", "legendFormat": "Redeem {{outcome}}", "refId": "B" }
+      ],
+      "title": "Merge & Redeem Outcomes (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 },
+      "id": 41,
+      "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_merge_latency_seconds_bucket[15m]))", "legendFormat": "Median Merge Latency", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(polymorph_arb_merge_latency_seconds_bucket[15m]))", "legendFormat": "p95 Merge Latency", "refId": "B" }
+      ],
+      "title": "Merge Transaction Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto" },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 },
+      "id": 42,
+      "options": { "legend": { "calcs": ["sum", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_usdc_merged_total", "legendFormat": "Cumulative USDC Merged", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_usdc_redeemed_total", "legendFormat": "Cumulative USDC Redeemed", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_pairs_merged_total", "legendFormat": "Cumulative Pairs Merged", "refId": "C" }
+      ],
+      "title": "Cumulative USDC Recovered",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 },
+      "id": 43,
+      "options": { "legend": { "calcs": ["mean", "min", "max", "count"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_cycle_profit_usdc_bucket[1h]))", "legendFormat": "Median Cycle Profit", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.1, rate(polymorph_arb_cycle_profit_usdc_bucket[1h]))", "legendFormat": "p10 Cycle Profit", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.9, rate(polymorph_arb_cycle_profit_usdc_bucket[1h]))", "legendFormat": "p90 Cycle Profit", "refId": "C" }
+      ],
+      "title": "Per-Cycle Profit Distribution",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 73 },
+      "id": 500,
+      "panels": [],
+      "title": "⏱️ Latency & Infrastructure",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 74 },
+      "id": 50,
+      "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_execution_latency_seconds_bucket{phase=\"total\"}[15m]))", "legendFormat": "Total (p50)", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(polymorph_arb_execution_latency_seconds_bucket{phase=\"total\"}[15m]))", "legendFormat": "Total (p95)", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_execution_latency_seconds_bucket{phase=\"signing\"}[15m]))", "legendFormat": "Signing (p50)", "refId": "C" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_execution_latency_seconds_bucket{phase=\"submission\"}[15m]))", "legendFormat": "Submission (p50)", "refId": "D" }
+      ],
+      "title": "Execution Latency by Phase",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 74 },
+      "id": 51,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_scan_duration_seconds_bucket[15m]))", "legendFormat": "Scan Duration (p50)", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(polymorph_arb_scan_duration_seconds_bucket[15m]))", "legendFormat": "Scan Duration (p95)", "refId": "B" }
+      ],
+      "title": "Market Scan Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 82 },
+      "id": 52,
+      "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(polymorph_arb_ws_book_updates_total[1m])", "legendFormat": "Book Updates/s ({{asset}})", "refId": "A" }
+      ],
+      "title": "WS Book Update Rate (per second)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "axisCenteredZero": false, "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 82 },
+      "id": 53,
+      "options": { "legend": { "calcs": ["sum", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "increase(polymorph_arb_ws_reconnects_total[5m])", "legendFormat": "WS Reconnects", "refId": "A" }
+      ],
+      "title": "WebSocket Reconnections (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 80 },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 90 },
+      "id": 54,
+      "options": { "legend": { "calcs": ["mean", "min", "max", "count"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(polymorph_arb_avg_pair_cost_bucket[1h]))", "legendFormat": "Median Pair Cost", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.1, rate(polymorph_arb_avg_pair_cost_bucket[1h]))", "legendFormat": "p10 (Best)", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.9, rate(polymorph_arb_avg_pair_cost_bucket[1h]))", "legendFormat": "p90 (Worst)", "refId": "C" }
+      ],
+      "title": "Average Pair Cost Distribution",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 90 },
+      "id": 55,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_tracked_markets", "legendFormat": "Tracked Markets", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "polymorph_arb_ws_subscribed_assets", "legendFormat": "WS Subscribed Assets", "refId": "B" }
+      ],
+      "title": "Market Discovery",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["polymorph", "arb", "crypto"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data Source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+  },
+  "timezone": "browser",
+  "title": "PollyMorph Arb Engine",
+  "uid": "polymorph-arb",
+  "version": 1
+}

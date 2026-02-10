@@ -1,5 +1,6 @@
 //! PollyMorph - High-Frequency Trading Bot for Polymarket
 //! Library crate exposing modules for integration tests.
+#![recursion_limit = "512"]
 
 pub mod config;
 pub mod types;
@@ -17,3 +18,4 @@ pub mod shadow;
 pub mod tuner;
 pub mod backtester;
 pub mod simulator;
+pub mod arb;

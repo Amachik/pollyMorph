@@ -418,6 +418,18 @@ impl RiskManager {
         }
     }
     
+    /// Override risk limits for ARB_MODE where capital management is handled by the arb engine.
+    /// Sets exposure and position limits high enough to not interfere with arb orders.
+    pub fn set_arb_mode_limits(&mut self, capital_usdc: f64) {
+        let capital_cents = (capital_usdc * 100.0) as i64;
+        self.max_exposure_cents = capital_cents;
+        self.max_position_cents = capital_cents;
+        info!(
+            "RiskManager ARB_MODE: max_exposure=${}, max_position=${}",
+            capital_cents / 100, capital_cents / 100
+        );
+    }
+
     /// Check if trading is allowed - HOT PATH
     /// Must be extremely fast as called before every trade
     #[inline(always)]

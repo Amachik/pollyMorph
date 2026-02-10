@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! PollyMorph - High-Frequency Trading Bot for Polymarket
 //! 
 //! Low-latency arbitrage and market-making system designed for:
@@ -31,6 +32,7 @@ mod shadow;
 mod tuner;
 mod backtester;
 mod simulator;
+mod arb;
 
 use crate::config::{Config, RuntimeParams};
 use crate::execution::{OrderExecutor, MakerManager};
@@ -84,12 +86,19 @@ async fn main() -> anyhow::Result<()> {
     // Initialize runtime parameters (can be modified at runtime)
     let runtime_params = Arc::new(RuntimeParams::new(&config));
     
+    // Check if running in Arb Mode (crypto Up/Down arbitrage)
+    let is_arb_mode = std::env::var("ARB_MODE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Check if running in Shadow Mode (no real trades)
     let is_shadow_mode = std::env::var("IS_SHADOW_MODE")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
     
-    if is_shadow_mode {
+    if is_arb_mode {
+        info!("🎯 ARB MODE ENABLED - Crypto Up/Down arbitrage strategy");
+    } else if is_shadow_mode {
         info!("🔮 SHADOW MODE ENABLED - No real trades will be executed");
     }
     
@@ -120,7 +129,16 @@ async fn main() -> anyhow::Result<()> {
     };
     
     // Initialize risk manager
-    let risk_manager = Arc::new(RiskManager::new(config.clone(), runtime_params.clone()));
+    let mut risk_manager = RiskManager::new(config.clone(), runtime_params.clone());
+    if is_arb_mode {
+        // Override risk limits for arb mode — arb engine manages its own capital
+        let arb_capital = std::env::var("ARB_CAPITAL")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(200.0);
+        risk_manager.set_arb_mode_limits(arb_capital);
+    }
+    let risk_manager = Arc::new(risk_manager);
     info!("Risk manager initialized with kill switch");
     
     // Create channels for inter-component communication
@@ -145,6 +163,70 @@ async fn main() -> anyhow::Result<()> {
     
     // Initialize maker manager
     let maker_manager = Arc::new(MakerManager::new(executor.clone()));
+
+    // ========================================================================
+    // ARB MODE: Run crypto Up/Down arbitrage instead of market-making
+    // ========================================================================
+    if is_arb_mode {
+        info!("🎯 Starting Arb Engine...");
+
+        // Check USDC balance and allowance
+        let capital = match executor.check_and_set_capital_from_balance().await {
+            Ok(raw) => {
+                let usdc = raw as f64 / 1_000_000.0;
+                info!("💰 USDC.e balance: ${:.2}", usdc);
+                usdc
+            }
+            Err(e) => {
+                // Fall back to env var or default
+                let fallback = std::env::var("ARB_CAPITAL")
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(100.0);
+                warn!("⚠️  Could not read on-chain balance: {}. Using ARB_CAPITAL=${:.2}", e, fallback);
+                fallback
+            }
+        };
+
+        // Ensure allowances
+        match executor.check_collateral_allowance().await {
+            Ok(allowance_raw) => {
+                let usdc = allowance_raw / 1_000_000;
+                if usdc < 10 {
+                    warn!("🚨 USDC allowance is only ${} — orders will fail!", usdc);
+                }
+            }
+            Err(e) => warn!("⚠️  Could not check allowance: {}", e),
+        }
+
+        // Notify CLOB about balances
+        if let Err(e) = executor.update_clob_balance_allowance(&[]).await {
+            warn!("⚠️  CLOB balance sync failed: {}", e);
+        }
+
+        let mut arb_engine = arb::ArbEngine::new(
+            config.clone(),
+            executor.clone(),
+            token_registry.clone(),
+            capital,
+        );
+
+        let shutdown_flag = arb_engine.shutdown_flag();
+
+        // Run arb engine with Ctrl+C handler
+        tokio::select! {
+            _ = arb_engine.run() => {
+                info!("Arb engine exited");
+            }
+            _ = tokio::signal::ctrl_c() => {
+                warn!("Shutdown signal received");
+                shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        info!("👋 PollyMorph ARB MODE shutdown complete");
+        return Ok(());
+    }
     
     // Fetch active markets from Polymarket API and subscribe
     let polymarket_ws = {
@@ -524,10 +606,7 @@ async fn run_event_processor(
             if snapshot.token_id != 0 && token_registry.get_str(snapshot.token_id).is_none() {
                 token_registry.register(snapshot.token_id, market_id.clone(), false);
             }
-            // Track spread per market
-            if let Some(spread_bps) = snapshot.spread_bps() {
-                metrics::update_market_spread(market_id, spread_bps as f64);
-            }
+            // Spread tracking now handled per-mode (arb metrics in arb.rs, live in pricing.rs)
         }
 
         // In Shadow Mode, check if incoming trades would fill our virtual orders

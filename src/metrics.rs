@@ -217,35 +217,308 @@ lazy_static! {
     ).expect("Failed to create rebates_earned counter");
     
     // ============================================================================
-    // ARBITRAGE METRICS
+    // ARBITRAGE METRICS — Full lifecycle tracking for arb mode
     // ============================================================================
-    
-    /// Counter for arbitrage opportunities detected
+
+    // --- Discovery & Opportunity Detection ---
+
+    /// Counter for arb opportunities detected, by asset (BTC/ETH) and source (ws/rest)
     pub static ref ARB_OPPORTUNITIES_DETECTED: IntCounterVec = IntCounterVec::new(
         Opts::new(
             "polymorph_arb_opportunities_detected_total",
             "Total arbitrage opportunities detected"
         ),
-        &["exchange_pair"]
+        &["asset", "source"]
     ).expect("Failed to create arb_opportunities_detected counter");
-    
-    /// Counter for arbitrage opportunities executed
+
+    /// Counter for arb opportunities executed (orders submitted)
     pub static ref ARB_OPPORTUNITIES_EXECUTED: IntCounterVec = IntCounterVec::new(
         Opts::new(
             "polymorph_arb_opportunities_executed_total",
-            "Total arbitrage opportunities successfully executed"
+            "Total arbitrage opportunities where orders were submitted"
         ),
-        &["exchange_pair"]
+        &["asset"]
     ).expect("Failed to create arb_opportunities_executed counter");
-    
-    /// Gauge for current spread by market
-    pub static ref MARKET_SPREAD_BPS: GaugeVec = GaugeVec::new(
+
+    /// Counter for arb opportunities skipped (insufficient capital, already executing, etc.)
+    pub static ref ARB_OPPORTUNITIES_SKIPPED: IntCounterVec = IntCounterVec::new(
         Opts::new(
-            "polymorph_market_spread_bps",
-            "Current market spread in basis points"
+            "polymorph_arb_opportunities_skipped_total",
+            "Total arb opportunities skipped by reason"
         ),
-        &["market_id"]
-    ).expect("Failed to create market_spread_bps gauge");
+        &["reason"]
+    ).expect("Failed to create arb_opportunities_skipped counter");
+
+    /// Gauge for tracked markets count
+    pub static ref ARB_TRACKED_MARKETS: IntGauge = IntGauge::with_opts(
+        Opts::new(
+            "polymorph_arb_tracked_markets",
+            "Number of markets currently tracked by arb engine"
+        )
+    ).expect("Failed to create arb_tracked_markets gauge");
+
+    /// Gauge for WS-subscribed asset count
+    pub static ref ARB_WS_SUBSCRIBED_ASSETS: IntGauge = IntGauge::with_opts(
+        Opts::new(
+            "polymorph_arb_ws_subscribed_assets",
+            "Number of asset IDs subscribed on WebSocket"
+        )
+    ).expect("Failed to create arb_ws_subscribed_assets gauge");
+
+    // --- Spread & Book Quality ---
+
+    /// Gauge for best pair cost (up_ask + down_ask) per asset
+    pub static ref ARB_BEST_PAIR_COST: GaugeVec = GaugeVec::new(
+        Opts::new(
+            "polymorph_arb_best_pair_cost",
+            "Best available pair cost (up_best_ask + down_best_ask)"
+        ),
+        &["asset"]
+    ).expect("Failed to create arb_best_pair_cost gauge");
+
+    /// Gauge for spread percentage per asset: (1 - pair_cost) * 100
+    pub static ref ARB_SPREAD_PCT: GaugeVec = GaugeVec::new(
+        Opts::new(
+            "polymorph_arb_spread_pct",
+            "Current arbitrage spread percentage"
+        ),
+        &["asset"]
+    ).expect("Failed to create arb_spread_pct gauge");
+
+    /// Gauge for available pairs at current spread
+    pub static ref ARB_AVAILABLE_PAIRS: GaugeVec = GaugeVec::new(
+        Opts::new(
+            "polymorph_arb_available_pairs",
+            "Number of profitable pairs available in the order book"
+        ),
+        &["asset"]
+    ).expect("Failed to create arb_available_pairs gauge");
+
+    /// Histogram for book depth (total ask liquidity) per side
+    pub static ref ARB_BOOK_DEPTH: GaugeVec = GaugeVec::new(
+        Opts::new(
+            "polymorph_arb_book_depth_tokens",
+            "Total ask-side depth in tokens"
+        ),
+        &["asset", "side"]
+    ).expect("Failed to create arb_book_depth gauge");
+
+    // --- Execution ---
+
+    /// Counter for orders submitted by side (up/down)
+    pub static ref ARB_ORDERS_SUBMITTED: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "polymorph_arb_orders_submitted_total",
+            "Total arb orders submitted"
+        ),
+        &["asset", "side"]
+    ).expect("Failed to create arb_orders_submitted counter");
+
+    /// Counter for orders filled (got tokens)
+    pub static ref ARB_ORDERS_FILLED: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "polymorph_arb_orders_filled_total",
+            "Total arb orders that received tokens"
+        ),
+        &["asset", "side"]
+    ).expect("Failed to create arb_orders_filled counter");
+
+    /// Counter for orders failed
+    pub static ref ARB_ORDERS_FAILED: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "polymorph_arb_orders_failed_total",
+            "Total arb orders that failed"
+        ),
+        &["asset", "side"]
+    ).expect("Failed to create arb_orders_failed counter");
+
+    /// Counter for tokens bought by side
+    pub static ref ARB_TOKENS_BOUGHT: CounterVec = CounterVec::new(
+        Opts::new(
+            "polymorph_arb_tokens_bought_total",
+            "Total tokens bought in arb mode"
+        ),
+        &["asset", "side"]
+    ).expect("Failed to create arb_tokens_bought counter");
+
+    /// Counter for USDC spent on arb orders
+    pub static ref ARB_USDC_SPENT: CounterVec = CounterVec::new(
+        Opts::new(
+            "polymorph_arb_usdc_spent_total",
+            "Total USDC spent on arb orders"
+        ),
+        &["asset", "side"]
+    ).expect("Failed to create arb_usdc_spent counter");
+
+    /// Histogram for fill rate (actual_tokens / requested_tokens)
+    pub static ref ARB_FILL_RATE: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "polymorph_arb_fill_rate",
+            "Fill rate per order (actual / requested)"
+        )
+        .buckets(vec![0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0])
+    ).expect("Failed to create arb_fill_rate histogram");
+
+    /// Histogram for average pair cost per cycle
+    pub static ref ARB_AVG_PAIR_COST: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "polymorph_arb_avg_pair_cost",
+            "Average pair cost per arb cycle"
+        )
+        .buckets(vec![0.90, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 1.0])
+    ).expect("Failed to create arb_avg_pair_cost histogram");
+
+    // --- Latency ---
+
+    /// Histogram for end-to-end arb execution latency (detection to last fill)
+    pub static ref ARB_EXECUTION_LATENCY: HistogramVec = HistogramVec::new(
+        HistogramOpts::new(
+            "polymorph_arb_execution_latency_seconds",
+            "Arb execution latency from detection to completion"
+        )
+        .buckets(vec![0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.0, 5.0]),
+        &["phase"]
+    ).expect("Failed to create arb_execution_latency histogram");
+
+    // --- Merge & Redeem (On-Chain) ---
+
+    /// Counter for merge attempts / successes / failures
+    pub static ref ARB_MERGE_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "polymorph_arb_merge_total",
+            "Total merge operations by outcome"
+        ),
+        &["outcome"]
+    ).expect("Failed to create arb_merge_total counter");
+
+    /// Counter for redeem attempts / successes / failures
+    pub static ref ARB_REDEEM_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "polymorph_arb_redeem_total",
+            "Total redeem operations by outcome"
+        ),
+        &["outcome"]
+    ).expect("Failed to create arb_redeem_total counter");
+
+    /// Counter for USDC recovered via merge
+    pub static ref ARB_USDC_MERGED: Counter = Counter::with_opts(
+        Opts::new(
+            "polymorph_arb_usdc_merged_total",
+            "Total USDC recovered via mergePositions"
+        )
+    ).expect("Failed to create arb_usdc_merged counter");
+
+    /// Counter for USDC recovered via redeem
+    pub static ref ARB_USDC_REDEEMED: Counter = Counter::with_opts(
+        Opts::new(
+            "polymorph_arb_usdc_redeemed_total",
+            "Total USDC recovered via redeemPositions"
+        )
+    ).expect("Failed to create arb_usdc_redeemed counter");
+
+    /// Counter for pairs merged on-chain
+    pub static ref ARB_PAIRS_MERGED: Counter = Counter::with_opts(
+        Opts::new(
+            "polymorph_arb_pairs_merged_total",
+            "Total token pairs merged on-chain"
+        )
+    ).expect("Failed to create arb_pairs_merged counter");
+
+    /// Histogram for merge tx latency (spawn to result)
+    pub static ref ARB_MERGE_LATENCY: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "polymorph_arb_merge_latency_seconds",
+            "Merge background task latency (spawn to completion)"
+        )
+        .buckets(vec![5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 150.0])
+    ).expect("Failed to create arb_merge_latency histogram");
+
+    // --- Capital & P&L ---
+
+    /// Gauge for available USDC capital
+    pub static ref ARB_CAPITAL_AVAILABLE: Gauge = Gauge::with_opts(
+        Opts::new(
+            "polymorph_arb_capital_available_usdc",
+            "Available USDC capital for arb"
+        )
+    ).expect("Failed to create arb_capital_available gauge");
+
+    /// Gauge for deployed capital (in open positions)
+    pub static ref ARB_CAPITAL_DEPLOYED: Gauge = Gauge::with_opts(
+        Opts::new(
+            "polymorph_arb_capital_deployed_usdc",
+            "Capital currently deployed in arb positions"
+        )
+    ).expect("Failed to create arb_capital_deployed gauge");
+
+    /// Gauge for cumulative P&L
+    pub static ref ARB_TOTAL_PNL: Gauge = Gauge::with_opts(
+        Opts::new(
+            "polymorph_arb_total_pnl_usdc",
+            "Cumulative arbitrage P&L in USDC"
+        )
+    ).expect("Failed to create arb_total_pnl gauge");
+
+    /// Histogram for per-cycle profit
+    pub static ref ARB_CYCLE_PROFIT: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "polymorph_arb_cycle_profit_usdc",
+            "Profit per arb cycle in USDC"
+        )
+        .buckets(vec![-5.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0])
+    ).expect("Failed to create arb_cycle_profit histogram");
+
+    /// Gauge for completed cycles count
+    pub static ref ARB_CYCLES_COMPLETED: IntGauge = IntGauge::with_opts(
+        Opts::new(
+            "polymorph_arb_cycles_completed",
+            "Total arb cycles completed (merge or redeem)"
+        )
+    ).expect("Failed to create arb_cycles_completed gauge");
+
+    /// Gauge for active positions count
+    pub static ref ARB_ACTIVE_POSITIONS: IntGauge = IntGauge::with_opts(
+        Opts::new(
+            "polymorph_arb_active_positions",
+            "Number of active arb positions"
+        )
+    ).expect("Failed to create arb_active_positions gauge");
+
+    // --- WebSocket Health ---
+
+    /// Gauge for arb WS connection status (1=connected, 0=disconnected)
+    pub static ref ARB_WS_CONNECTED: IntGauge = IntGauge::with_opts(
+        Opts::new(
+            "polymorph_arb_ws_connected",
+            "Arb WebSocket connection status"
+        )
+    ).expect("Failed to create arb_ws_connected gauge");
+
+    /// Counter for WS book updates received
+    pub static ref ARB_WS_BOOK_UPDATES: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "polymorph_arb_ws_book_updates_total",
+            "Total book updates received via WebSocket"
+        ),
+        &["asset"]
+    ).expect("Failed to create arb_ws_book_updates counter");
+
+    /// Counter for WS reconnections
+    pub static ref ARB_WS_RECONNECTS: IntCounter = IntCounter::with_opts(
+        Opts::new(
+            "polymorph_arb_ws_reconnects_total",
+            "Total WebSocket reconnections"
+        )
+    ).expect("Failed to create arb_ws_reconnects counter");
+
+    /// Gauge for market scan duration
+    pub static ref ARB_SCAN_DURATION: Histogram = Histogram::with_opts(
+        HistogramOpts::new(
+            "polymorph_arb_scan_duration_seconds",
+            "Duration of market scan cycle"
+        )
+        .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0])
+    ).expect("Failed to create arb_scan_duration histogram");
     
     // ============================================================================
     // INTERNAL LATENCY METRICS - TSC-based high-precision timing
@@ -538,10 +811,40 @@ pub fn register_metrics() {
     REGISTRY.register(Box::new(FEES_PAID.clone())).unwrap();
     REGISTRY.register(Box::new(REBATES_EARNED.clone())).unwrap();
     
-    // Arbitrage metrics
+    // Arbitrage metrics — full lifecycle
     REGISTRY.register(Box::new(ARB_OPPORTUNITIES_DETECTED.clone())).unwrap();
     REGISTRY.register(Box::new(ARB_OPPORTUNITIES_EXECUTED.clone())).unwrap();
-    REGISTRY.register(Box::new(MARKET_SPREAD_BPS.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_OPPORTUNITIES_SKIPPED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_TRACKED_MARKETS.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_WS_SUBSCRIBED_ASSETS.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_BEST_PAIR_COST.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_SPREAD_PCT.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_AVAILABLE_PAIRS.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_BOOK_DEPTH.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_ORDERS_SUBMITTED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_ORDERS_FILLED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_ORDERS_FAILED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_TOKENS_BOUGHT.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_USDC_SPENT.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_FILL_RATE.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_AVG_PAIR_COST.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_EXECUTION_LATENCY.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_MERGE_TOTAL.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_REDEEM_TOTAL.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_USDC_MERGED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_USDC_REDEEMED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_PAIRS_MERGED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_MERGE_LATENCY.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_CAPITAL_AVAILABLE.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_CAPITAL_DEPLOYED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_TOTAL_PNL.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_CYCLE_PROFIT.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_CYCLES_COMPLETED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_ACTIVE_POSITIONS.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_WS_CONNECTED.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_WS_BOOK_UPDATES.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_WS_RECONNECTS.clone())).unwrap();
+    REGISTRY.register(Box::new(ARB_SCAN_DURATION.clone())).unwrap();
     
     // Internal latency metrics (TSC-based)
     REGISTRY.register(Box::new(INTERNAL_TICK_TO_TRADE.clone())).unwrap();
@@ -794,16 +1097,11 @@ pub fn record_signing_latency(duration_secs: f64) {
 }
 
 /// Record arbitrage opportunity
-pub fn record_arb_opportunity(exchange_pair: &str, executed: bool) {
-    ARB_OPPORTUNITIES_DETECTED.with_label_values(&[exchange_pair]).inc();
+pub fn record_arb_opportunity(asset: &str, source: &str, executed: bool) {
+    ARB_OPPORTUNITIES_DETECTED.with_label_values(&[asset, source]).inc();
     if executed {
-        ARB_OPPORTUNITIES_EXECUTED.with_label_values(&[exchange_pair]).inc();
+        ARB_OPPORTUNITIES_EXECUTED.with_label_values(&[asset]).inc();
     }
-}
-
-/// Update market spread metric
-pub fn update_market_spread(market_id: &str, spread_bps: f64) {
-    MARKET_SPREAD_BPS.with_label_values(&[market_id]).set(spread_bps);
 }
 
 /// Metrics server configuration

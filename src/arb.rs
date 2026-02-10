@@ -2132,11 +2132,33 @@ async fn run_book_watcher(
             return;
         }
 
-        info!("📡 Connecting to CLOB WebSocket: {}", CLOB_WS_MARKET_URL);
+        // Wait for at least one asset subscription before connecting.
+        // The Polymarket CLOB WS server resets connections with no initial subscription.
+        while pending_subs.is_empty() {
+            match cmd_rx.recv().await {
+                Some(WsCommand::Subscribe(ids)) => {
+                    for id in ids {
+                        if !pending_subs.contains(&id) {
+                            pending_subs.push(id);
+                        }
+                    }
+                }
+                Some(WsCommand::Unsubscribe(ids)) => {
+                    pending_subs.retain(|id| !ids.contains(id));
+                }
+                None => {
+                    info!("📡 Command channel closed — stopping book watcher");
+                    return;
+                }
+            }
+            if shutdown.load(Ordering::Relaxed) { return; }
+        }
+
+        info!("📡 Connecting to CLOB WebSocket: {} ({} assets pending)", CLOB_WS_MARKET_URL, pending_subs.len());
 
         match connect_async(CLOB_WS_MARKET_URL).await {
             Ok((ws_stream, _)) => {
-                backoff_secs = 1; // Reset backoff on successful connect
+                let connect_time = std::time::Instant::now();
                 metrics::ARB_WS_RECONNECTS.inc();
                 let _ = event_tx.send(ArbWsEvent::Connected(true)).await;
 
@@ -2245,6 +2267,11 @@ async fn run_book_watcher(
 
                 // Disconnected — notify engine
                 let _ = event_tx.send(ArbWsEvent::Connected(false)).await;
+
+                // Only reset backoff if connection was stable (>5s)
+                if connect_time.elapsed().as_secs() > 5 {
+                    backoff_secs = 1;
+                }
             }
             Err(e) => {
                 warn!("📡 WS connect failed: {} — retrying in {}s", e, backoff_secs);

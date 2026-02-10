@@ -792,15 +792,15 @@ impl ArbEngine {
         let mut candidates: Vec<(String, i64)> = Vec::new();
 
         for event in events {
-            let closed = event.get("closed").and_then(|v| v.as_bool()).unwrap_or(true);
-            if closed { continue; }
-
-            // Skip events that ended more than 2 hours ago (stale but not yet marked closed)
+            // Don't filter by "closed" boolean — Polymarket marks hourly events as
+            // closed once they start, even though markets inside are still actively
+            // trading. The per-market `acceptingOrders` check (later) is the real gate.
+            // Instead, only skip events whose endDate is clearly in the past.
             let end_str = event.get("endDate").and_then(|v| v.as_str()).unwrap_or("");
             if !end_str.is_empty() {
                 if let Ok(end_dt) = chrono::DateTime::parse_from_rfc3339(end_str) {
-                    if end_dt.timestamp() < now - 7200 {
-                        continue; // Ended > 2 hours ago, skip
+                    if end_dt.timestamp() < now - 300 {
+                        continue; // Ended > 5 min ago, skip
                     }
                 }
             }

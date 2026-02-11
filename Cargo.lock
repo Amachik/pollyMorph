@@ -3394,6 +3394,7 @@ dependencies = [
  "dotenvy",
  "ethers",
  "ethers-core",
+ "fs2",
  "futures-util",
  "governor",
  "hex",

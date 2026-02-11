@@ -60,7 +60,10 @@ const REPORT_BUFFER: usize = 1_000;
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
     init_logging();
-    
+
+    // Prevent multiple instances from running simultaneously
+    let _lock = acquire_instance_lock()?;
+
     info!("🚀 PollyMorph HFT Bot Starting...");
     info!("Target: Polymarket CLOB on Polygon");
     
@@ -990,6 +993,41 @@ async fn warm_order_cache(
     }
     
     info!("Order cache warm-up complete");
+}
+
+/// Acquire an exclusive file lock to prevent multiple bot instances.
+/// Returns the locked File handle — lock is held until the process exits.
+fn acquire_instance_lock() -> anyhow::Result<std::fs::File> {
+    use std::io::{Seek, Write};
+    use fs2::FileExt;
+
+    let lock_path = std::env::temp_dir().join("polymorph-hft.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            // Got the lock — write our PID
+            file.set_len(0)?;
+            file.seek(std::io::SeekFrom::Start(0))?;
+            writeln!(file, "{}", std::process::id())?;
+            eprintln!("Instance lock acquired (PID: {})", std::process::id());
+            Ok(file)
+        }
+        Err(_) => {
+            // Read the PID of the already-running instance
+            let mut pid = String::new();
+            std::io::Read::read_to_string(&mut file, &mut pid).ok();
+            anyhow::bail!(
+                "Another PollyMorph instance is already running (PID: {}). Kill it first with: kill {}",
+                pid.trim(),
+                pid.trim()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

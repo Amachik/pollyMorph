@@ -122,6 +122,9 @@ smallvec = "1.11"
 # Cryptographic randomness for order salt generation
 rand = "0.8"
 
+# File locking for single-instance guard
+fs2 = "0.4"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio-test = "0.4"

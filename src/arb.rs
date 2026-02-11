@@ -733,7 +733,7 @@ impl ArbEngine {
                 let now = chrono::Utc::now().timestamp();
                 let mut new_subscribe: Vec<String> = Vec::new();
 
-                for market in markets {
+                for mut market in markets {
                     // Check if within the broad monitoring window
                     if now > market.event_end_ts + 300 {
                         continue; // Already ended

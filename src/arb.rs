@@ -169,6 +169,8 @@ struct TokenBook {
     ask_levels: Vec<BookLevel>,
     /// Total tokens available across all ask levels
     total_ask_depth: f64,
+    /// When this book was last updated (monotonic clock for freshness checks)
+    updated_at: std::time::Instant,
 }
 
 /// Events sent from the WebSocket book watcher to the arb engine.
@@ -291,6 +293,9 @@ pub struct ArbEngine {
     merge_rx: mpsc::Receiver<MergeResult>,
     /// Sender for background merge/redeem tasks (cloned into spawned tasks).
     merge_tx: mpsc::Sender<MergeResult>,
+    /// Cache of event_id → parsed ArbMarkets to avoid re-fetching known events.
+    /// Dramatically reduces scan_markets latency from ~7s to <1s after first scan.
+    event_detail_cache: HashMap<String, Vec<ArbMarket>>,
 }
 
 impl ArbEngine {
@@ -345,6 +350,7 @@ impl ArbEngine {
             executing_slugs: std::collections::HashSet::new(),
             merge_rx,
             merge_tx,
+            event_detail_cache: HashMap::new(),
         }
     }
 
@@ -584,6 +590,7 @@ impl ArbEngine {
             // the sorted ask_levels for actual sizing. IOC orders handle any staleness.
             cached.best_bid = best_bid;
             cached.best_ask = best_ask;
+            cached.updated_at = std::time::Instant::now();
         } else {
             // No cached book yet — create minimal placeholder.
             // This will be overwritten by the next full "book" snapshot.
@@ -592,6 +599,7 @@ impl ArbEngine {
                 best_ask,
                 ask_levels: vec![BookLevel { price: best_ask, size: 100.0 }],
                 total_ask_depth: 100.0,
+                updated_at: std::time::Instant::now(),
             });
         }
 
@@ -905,7 +913,7 @@ impl ArbEngine {
     /// We do NOT filter by `closed` on stubs because Polymarket marks hourly events
     /// as closed=true once they start, even though markets inside are still trading.
     /// We rely on per-market `acceptingOrders` and duration filtering instead.
-    async fn scan_markets(&self) -> Result<Vec<ArbMarket>, String> {
+    async fn scan_markets(&mut self) -> Result<Vec<ArbMarket>, String> {
         let mut all_markets = Vec::new();
 
         for (series, asset) in [
@@ -932,7 +940,7 @@ impl ArbEngine {
     ///
     /// Step 1: GET /series?slug=X&active=true → lightweight event stubs (no clobTokenIds)
     /// Step 2: GET /events/{id} for each non-expired event → full market data
-    async fn fetch_series_events(&self, series_slug: &str, asset: ArbAsset) -> Result<Vec<ArbMarket>, String> {
+    async fn fetch_series_events(&mut self, series_slug: &str, asset: ArbAsset) -> Result<Vec<ArbMarket>, String> {
         let series_url = format!(
             "https://gamma-api.polymarket.com/series?slug={}&active=true",
             series_slug
@@ -1006,38 +1014,58 @@ impl ArbEngine {
             return Ok(Vec::new());
         }
 
-        info!("📡 {}: {} candidate events, fetching full details...", series_slug, event_ids.len());
+        // Step 2: Check cache for already-fetched events.
+        // Only fetch events we haven't seen before — saves ~7s of HTTP round-trips.
+        let mut markets = Vec::new();
+        let mut uncached_ids: Vec<&String> = Vec::new();
 
-        // Step 2: Fetch full event details concurrently.
-        let futures: Vec<_> = event_ids.iter().map(|event_id| {
+        for id in &event_ids {
+            if let Some(cached_markets) = self.event_detail_cache.get(id) {
+                // Use cached parsed markets (skip expired ones)
+                for arb in cached_markets {
+                    if arb.event_end_ts > 0 && arb.event_end_ts < now - 300 { continue; }
+                    markets.push(arb.clone());
+                }
+            } else {
+                uncached_ids.push(id);
+            }
+        }
+
+        if uncached_ids.is_empty() {
+            debug!("📡 {}: {} events (all cached)", series_slug, event_ids.len());
+            return Ok(markets);
+        }
+
+        info!("📡 {}: {} candidate events ({} cached, {} to fetch)",
+              series_slug, event_ids.len(), event_ids.len() - uncached_ids.len(), uncached_ids.len());
+
+        // Fetch only uncached event details concurrently.
+        let futures: Vec<_> = uncached_ids.iter().map(|event_id| {
             let url = format!("https://gamma-api.polymarket.com/events/{}", event_id);
             let client = self.client.clone();
+            let eid = (*event_id).clone();
             async move {
                 let resp = client.get(&url).send().await.ok()?;
                 if !resp.status().is_success() { return None; }
-                resp.json::<serde_json::Value>().await.ok()
+                let val = resp.json::<serde_json::Value>().await.ok()?;
+                Some((eid, val))
             }
         }).collect();
 
         let results = futures_util::future::join_all(futures).await;
 
-        let mut markets = Vec::new();
-        for event in results.into_iter().flatten() {
+        for (event_id, event) in results.into_iter().flatten() {
             let event_markets = match event.get("markets").and_then(|m| m.as_array()) {
                 Some(m) => m,
                 None => continue,
             };
 
+            let mut cached_for_event = Vec::new();
             for market in event_markets {
                 let arb = match self.parse_arb_market(&event, market, asset) {
                     Some(a) => a,
                     None => continue,
                 };
-
-                // Skip markets that ended more than 5 minutes ago
-                if arb.event_end_ts > 0 && arb.event_end_ts < now - 300 {
-                    continue;
-                }
 
                 // Accept ~15-minute windows (900s ± 300s) and ~1-hour windows (3600s ± 900s).
                 // This excludes 4-hour windows (14400s) and other unusual durations.
@@ -1054,9 +1082,23 @@ impl ArbEngine {
                 // we receive the FIRST book snapshot the instant the market opens.
                 // The entry window check in handle_book_update prevents premature execution.
 
-                markets.push(arb);
+                cached_for_event.push(arb);
             }
+
+            // Add to results (skip expired)
+            for arb in &cached_for_event {
+                if arb.event_end_ts > 0 && arb.event_end_ts < now - 300 { continue; }
+                markets.push(arb.clone());
+            }
+
+            // Cache for future scans
+            self.event_detail_cache.insert(event_id, cached_for_event);
         }
+
+        // Evict expired events from cache (endDate > 10 min ago)
+        self.event_detail_cache.retain(|_, v| {
+            v.iter().any(|m| m.event_end_ts > now - 600)
+        });
 
         Ok(markets)
     }
@@ -1198,7 +1240,7 @@ impl ArbEngine {
             0.0
         };
 
-        Ok(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth })
+        Ok(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth, updated_at: std::time::Instant::now() })
     }
 
     /// Fetch both Up and Down order books in a single HTTP request via POST /books.
@@ -1296,7 +1338,7 @@ impl ArbEngine {
             0.0
         };
 
-        Ok(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth })
+        Ok(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth, updated_at: std::time::Instant::now() })
     }
 
     /// Analyze the full arb opportunity across all book levels.
@@ -1495,7 +1537,25 @@ impl ArbEngine {
         // Fetch fresh books via REST (~30-50ms) and re-run the sweep to get
         // accurate, up-to-date depth for order building. IOC orders protect us
         // from stale levels, but fresh data means fewer wasted order slots.
-        let opp = match self.fetch_both_books(&market.up_token_id, &market.down_token_id).await {
+        //
+        // OPTIMIZATION: Skip the REST fetch if BOTH cached books were updated
+        // within the last 200ms via WS. The WS data is actually MORE current
+        // than a REST fetch (which adds 30-50ms of round-trip latency).
+        // This saves ~30-50ms on the critical execution path.
+        let ws_fresh = {
+            let up_age = self.book_cache.get(&market.up_token_id)
+                .map(|b| b.updated_at.elapsed());
+            let down_age = self.book_cache.get(&market.down_token_id)
+                .map(|b| b.updated_at.elapsed());
+            matches!((up_age, down_age), (Some(u), Some(d))
+                if u.as_millis() < 200 && d.as_millis() < 200)
+        };
+
+        let opp = if ws_fresh {
+            debug!("   ⚡ WS books fresh (<200ms) — skipping REST fetch");
+            opp
+        } else {
+        match self.fetch_both_books(&market.up_token_id, &market.down_token_id).await {
             Ok((fresh_up, fresh_down)) => {
                 // Update cache with fresh data
                 self.book_cache.insert(market.up_token_id.clone(), fresh_up.clone());
@@ -1531,7 +1591,8 @@ impl ArbEngine {
                 warn!("   ⚠️  Fresh book fetch failed: {} — using cached data", e);
                 opp
             }
-        };
+        }
+        }; // close if ws_fresh { ... } else { ... }
 
         // Re-check capital against potentially updated opportunity
         let effective_capital = available_capital.min(self.max_per_cycle);
@@ -1555,6 +1616,10 @@ impl ArbEngine {
         let mut down_signals = Vec::new();
         let mut remaining_capital = effective_capital;
 
+        // Fee multipliers for capital budgeting
+        let up_fee_mult = 1.0 + market.up_fee_bps as f64 / 10000.0;
+        let down_fee_mult = 1.0 + market.down_fee_bps as f64 / 10000.0;
+
         // Scale orders to fit within capital
         let capital_scale = if opp.total_cost > effective_capital {
             effective_capital / opp.total_cost
@@ -1566,7 +1631,7 @@ impl ArbEngine {
             let scaled_size = level.size * capital_scale;
             if scaled_size < MIN_ORDER_SIZE { continue; }
 
-            let cost = scaled_size * level.price;
+            let cost = scaled_size * level.price * up_fee_mult;
             if cost > remaining_capital { continue; }
             remaining_capital -= cost;
 
@@ -1589,7 +1654,7 @@ impl ArbEngine {
             let scaled_size = level.size * capital_scale;
             if scaled_size < MIN_ORDER_SIZE { continue; }
 
-            let cost = scaled_size * level.price;
+            let cost = scaled_size * level.price * down_fee_mult;
             if cost > remaining_capital { continue; }
             remaining_capital -= cost;
 
@@ -2338,7 +2403,7 @@ async fn submit_order_side(
     use rust_decimal::prelude::ToPrimitive;
 
     const BATCH_LIMIT: usize = 15;
-    const INTER_BATCH_DELAY_MS: u64 = 20;
+    const INTER_BATCH_DELAY_MS: u64 = 5;
 
     let mut orders_ok = 0u32;
     let mut tokens_total = 0.0_f64;
@@ -3312,5 +3377,5 @@ fn parse_ws_book(msg: &serde_json::Value) -> Option<TokenBook> {
         return None;
     }
 
-    Some(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth })
+    Some(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth, updated_at: std::time::Instant::now() })
 }

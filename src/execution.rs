@@ -1058,14 +1058,33 @@ impl OrderExecutor {
         let fee_rate_bps = match self.client.get(&fee_url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let val: serde_json::Value = resp.json().await.unwrap_or_default();
-                // API returns fee_rate as a string like "150" (basis points)
-                val["fee_rate_bps"].as_str()
-                    .or(val["fee_rate_bps"].as_u64().map(|_| "").or(None))
+                debug!("Fee API raw response for {}...{}: {}",
+                       &token_id_str[..8.min(token_id_str.len())],
+                       &token_id_str[token_id_str.len().saturating_sub(4)..],
+                       val);
+                // Try "fee_rate_bps" field (string or number)
+                let bps = val["fee_rate_bps"].as_str()
                     .and_then(|s| s.parse::<u32>().ok())
                     .or_else(|| val["fee_rate_bps"].as_u64().map(|v| v as u32))
-                    .unwrap_or(0)
+                    // Also try "maker" / "taker" format (some API versions)
+                    .or_else(|| val["taker"].as_str().and_then(|s| {
+                        // Could be decimal like "0.02" (= 200 bps) or bps like "200"
+                        s.parse::<f64>().ok().map(|v| {
+                            if v < 1.0 { (v * 10000.0) as u32 } else { v as u32 }
+                        })
+                    }))
+                    .unwrap_or(0);
+                bps
             }
-            _ => 0,
+            Ok(resp) => {
+                warn!("Fee API returned status {} for {}...", resp.status(),
+                      &token_id_str[..16.min(token_id_str.len())]);
+                0
+            }
+            Err(e) => {
+                warn!("Fee API request failed for {}...: {}", &token_id_str[..16.min(token_id_str.len())], e);
+                0
+            }
         };
 
         // Fetch tick_size

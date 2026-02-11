@@ -74,6 +74,11 @@ const CLOB_WS_MARKET_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/
 /// WebSocket keepalive interval (docs say send "PING" every 10s).
 const WS_PING_INTERVAL_SECS: u64 = 10;
 
+/// Maximum assets per WS subscribe message.
+/// Polymarket resets connections when a single subscribe message is too large.
+/// Batch subscriptions into chunks of this size with a small delay between.
+const WS_SUB_BATCH_SIZE: usize = 100;
+
 /// Channel buffer size for WS → engine communication.
 const WS_CHANNEL_BUFFER: usize = 1024;
 
@@ -108,6 +113,10 @@ pub struct ArbMarket {
     pub event_end_ts: i64,
     /// Asset (BTC or ETH)
     pub asset: ArbAsset,
+    /// Taker fee in basis points for Up token (e.g. 200 = 2%)
+    pub up_fee_bps: u32,
+    /// Taker fee in basis points for Down token
+    pub down_fee_bps: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +375,10 @@ impl ArbEngine {
         let mut scan_interval = tokio::time::interval(
             std::time::Duration::from_secs(MARKET_SCAN_INTERVAL_SECS)
         );
+        // Delay mode: if a tick is missed while discover_and_subscribe() is running,
+        // don't fire immediately — wait the full interval from completion.
+        // Without this, scans run back-to-back since discovery takes ~7s.
+        scan_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Fire immediately on first tick
         scan_interval.tick().await;
 
@@ -394,11 +407,9 @@ impl ArbEngine {
                             self.ws_connected = connected;
                             if connected {
                                 info!("🔌 WS: Connected to CLOB market channel");
-                                // Re-subscribe to all tracked markets
-                                if !self.ws_subscribed.is_empty() {
-                                    let ids: Vec<String> = self.ws_subscribed.iter().cloned().collect();
-                                    let _ = self.ws_cmd_tx.send(WsCommand::Subscribe(ids)).await;
-                                }
+                                // No need to re-subscribe here — run_book_watcher already
+                                // sends all pending_subs in batches during initial connection.
+                                // Sending them again would double the subscription load.
                             } else {
                                 warn!("🔌 WS: Disconnected from CLOB market channel — falling back to REST");
                             }
@@ -520,8 +531,10 @@ impl ArbEngine {
         metrics::ARB_BOOK_DEPTH.with_label_values(&[asset_lbl, "up"]).set(up_book.total_ask_depth);
         metrics::ARB_BOOK_DEPTH.with_label_values(&[asset_lbl, "down"]).set(down_book.total_ask_depth);
 
-        // Track best pair cost and spread
-        let pair_cost = up_book.best_ask + down_book.best_ask;
+        // Track best pair cost and spread (fee-adjusted)
+        let up_fee_mult = 1.0 + market.up_fee_bps as f64 / 10000.0;
+        let down_fee_mult = 1.0 + market.down_fee_bps as f64 / 10000.0;
+        let pair_cost = up_book.best_ask * up_fee_mult + down_book.best_ask * down_fee_mult;
         metrics::ARB_BEST_PAIR_COST.with_label_values(&[asset_lbl]).set(pair_cost);
         metrics::ARB_SPREAD_PCT.with_label_values(&[asset_lbl]).set((1.0 - pair_cost) * 100.0);
 
@@ -609,13 +622,15 @@ impl ArbEngine {
             None => return,
         };
 
-        // Update metrics (same as handle_book_update)
+        // Update metrics — use fee-adjusted pair cost for accurate spread tracking
         let asset_lbl = market.asset.label();
-        let pair_cost = up_book.best_ask + down_book.best_ask;
+        let up_fee_mult = 1.0 + market.up_fee_bps as f64 / 10000.0;
+        let down_fee_mult = 1.0 + market.down_fee_bps as f64 / 10000.0;
+        let pair_cost = up_book.best_ask * up_fee_mult + down_book.best_ask * down_fee_mult;
         metrics::ARB_BEST_PAIR_COST.with_label_values(&[asset_lbl]).set(pair_cost);
         metrics::ARB_SPREAD_PCT.with_label_values(&[asset_lbl]).set((1.0 - pair_cost) * 100.0);
 
-        // Quick exit: if top-of-book pair cost is above threshold, no opportunity
+        // Quick exit: if top-of-book pair cost (with fees) is above threshold, no opportunity
         if pair_cost >= MAX_PAIR_COST { return; }
 
         // Spread looks promising — run full sweep on cached (real-depth) books
@@ -749,6 +764,14 @@ impl ArbEngine {
                             let _ = self.executor.fetch_and_register_market_info(&token_id, hash).await;
                         }
 
+                        // Populate taker fee info from token registry into ArbMarket
+                        market.up_fee_bps = self.token_registry.fee_rate_bps(up_hash);
+                        market.down_fee_bps = self.token_registry.fee_rate_bps(down_hash);
+                        if market.up_fee_bps > 0 || market.down_fee_bps > 0 {
+                            warn!("💰 FEES DETECTED on {}: Up={}bps, Down={}bps — arb threshold adjusted",
+                                  market.title, market.up_fee_bps, market.down_fee_bps);
+                        }
+
                         // Collect for WS subscribe
                         if !self.ws_subscribed.contains(&market.up_token_id) {
                             new_subscribe.push(market.up_token_id.clone());
@@ -857,7 +880,10 @@ impl ArbEngine {
             return None;
         }
 
-        let best_pair_cost = up_book.best_ask + down_book.best_ask;
+        // Fee-adjusted quick check
+        let up_fee_mult = 1.0 + market.up_fee_bps as f64 / 10000.0;
+        let down_fee_mult = 1.0 + market.down_fee_bps as f64 / 10000.0;
+        let best_pair_cost = up_book.best_ask * up_fee_mult + down_book.best_ask * down_fee_mult;
         if best_pair_cost >= MAX_PAIR_COST {
             return None;
         }
@@ -1115,6 +1141,8 @@ impl ArbEngine {
             event_start_ts,
             event_end_ts,
             asset,
+            up_fee_bps: 0,
+            down_fee_bps: 0,
         })
     }
 
@@ -1296,7 +1324,7 @@ impl ArbEngine {
     /// Returns the execution plan if profitable, or None.
     fn find_arb_pairs(
         &self,
-        _market: &ArbMarket,
+        market: &ArbMarket,
         up_book: &TokenBook,
         down_book: &TokenBook,
     ) -> Option<ArbOpportunity> {
@@ -1304,7 +1332,11 @@ impl ArbEngine {
             return None;
         }
 
-        let best_pair_cost = up_book.best_ask + down_book.best_ask;
+        // Fee multipliers: buying at price P costs P * fee_mult
+        let up_fee_mult = 1.0 + market.up_fee_bps as f64 / 10000.0;
+        let down_fee_mult = 1.0 + market.down_fee_bps as f64 / 10000.0;
+
+        let best_pair_cost = up_book.best_ask * up_fee_mult + down_book.best_ask * down_fee_mult;
         if best_pair_cost >= MAX_PAIR_COST {
             return None;
         }
@@ -1320,7 +1352,7 @@ impl ArbEngine {
         let mut total_cost = 0.0_f64;
 
         // We iterate through Up levels. For each Up level, we find the maximum
-        // Down price we can afford: max_down_price = MAX_PAIR_COST - up_price.
+        // Down price we can afford: max_down_price = (MAX_PAIR_COST - up_price * up_fee_mult) / down_fee_mult.
         // Then we sweep Down levels up to that price.
         let mut down_idx = 0;
         let mut down_remaining_at_level = if !down_book.ask_levels.is_empty() {
@@ -1330,9 +1362,10 @@ impl ArbEngine {
         };
 
         for up_level in &up_book.ask_levels {
-            let max_down_price = MAX_PAIR_COST - up_level.price;
+            let up_cost_per_token = up_level.price * up_fee_mult;
+            let max_down_price = (MAX_PAIR_COST - up_cost_per_token) / down_fee_mult;
             if max_down_price <= 0.0 {
-                break; // Up price alone exceeds threshold
+                break; // Up price alone (with fees) exceeds threshold
             }
 
             let mut up_remaining = up_level.size;
@@ -1361,7 +1394,7 @@ impl ArbEngine {
                     }
                 }
 
-                let pair_cost = up_level.price + down_level.price;
+                let pair_cost = up_level.price * up_fee_mult + down_level.price * down_fee_mult;
                 let cost = pairs * pair_cost;
 
                 up_orders.push(BookLevel { price: up_level.price, size: pairs });
@@ -2432,16 +2465,40 @@ async fn run_book_watcher(
 
                 let (mut write, mut read) = ws_stream.split();
 
-                // Send initial subscription if we have pending asset IDs
+                // Send initial subscription in batches to avoid server reset.
+                // Polymarket WS drops connections when subscribe payload is too large.
                 if !pending_subs.is_empty() {
-                    let sub_msg = serde_json::json!({
-                        "assets_ids": pending_subs,
-                        "type": "market"
-                    });
-                    if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
-                        warn!("📡 WS initial subscribe failed: {}", e);
-                    } else {
-                        info!("📡 WS subscribed to {} assets on connect", pending_subs.len());
+                    let total = pending_subs.len();
+                    let mut sent = 0usize;
+                    let mut failed = false;
+                    for chunk in pending_subs.chunks(WS_SUB_BATCH_SIZE) {
+                        let sub_msg = if sent == 0 {
+                            // First batch uses "type": "market" for initial connection
+                            serde_json::json!({
+                                "assets_ids": chunk,
+                                "type": "market"
+                            })
+                        } else {
+                            // Subsequent batches use "operation": "subscribe"
+                            serde_json::json!({
+                                "assets_ids": chunk,
+                                "operation": "subscribe"
+                            })
+                        };
+                        if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
+                            warn!("📡 WS initial subscribe batch failed: {}", e);
+                            failed = true;
+                            break;
+                        }
+                        sent += chunk.len();
+                        // Small delay between batches to avoid overwhelming the server
+                        if sent < total {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    }
+                    if !failed {
+                        info!("📡 WS subscribed to {} assets on connect ({} batches)",
+                              total, (total + WS_SUB_BATCH_SIZE - 1) / WS_SUB_BATCH_SIZE);
                     }
                 }
 
@@ -2493,15 +2550,25 @@ async fn run_book_watcher(
                                             pending_subs.push(id.clone());
                                         }
                                     }
-                                    let sub_msg = serde_json::json!({
-                                        "assets_ids": ids,
-                                        "operation": "subscribe"
-                                    });
-                                    if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
-                                        warn!("📡 WS subscribe failed: {}", e);
-                                        break;
+                                    // Batch subscribe to avoid oversized messages
+                                    let total = ids.len();
+                                    let mut sub_failed = false;
+                                    for chunk in ids.chunks(WS_SUB_BATCH_SIZE) {
+                                        let sub_msg = serde_json::json!({
+                                            "assets_ids": chunk,
+                                            "operation": "subscribe"
+                                        });
+                                        if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
+                                            warn!("📡 WS subscribe batch failed: {}", e);
+                                            sub_failed = true;
+                                            break;
+                                        }
+                                        if chunk.len() == WS_SUB_BATCH_SIZE {
+                                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                        }
                                     }
-                                    debug!("📡 WS subscribed to {} new assets", ids.len());
+                                    if sub_failed { break; }
+                                    debug!("📡 WS subscribed to {} new assets", total);
                                 }
                                 Some(WsCommand::Unsubscribe(ids)) => {
                                     if ids.is_empty() { continue; }
@@ -2882,6 +2949,8 @@ async fn run_background_merge(
                 event_start_ts: 0,
                 event_end_ts: 0,
                 asset: ArbAsset::BTC, // Will be corrected by position lookup
+                up_fee_bps: 0,
+                down_fee_bps: 0,
             },
             up_tokens_bought: excess_up,
             down_tokens_bought: excess_down,

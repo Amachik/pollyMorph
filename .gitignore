@@ -19,3 +19,5 @@ Thumbs.db
 # Data
 *.log
 data/
+arb_positions.json
+arb_positions.json.tmp

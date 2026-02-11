@@ -82,12 +82,68 @@ const WS_SUB_BATCH_SIZE: usize = 100;
 /// Channel buffer size for WS → engine communication.
 const WS_CHANNEL_BUFFER: usize = 1024;
 
+/// File path for persisting open positions across restarts.
+const POSITIONS_FILE: &str = "arb_positions.json";
+
+// ---------------------------------------------------------------------------
+// Position Persistence
+// ---------------------------------------------------------------------------
+
+/// Save current positions to disk (atomic write via temp file + rename).
+fn save_positions(positions: &[CyclePosition]) {
+    let active: Vec<&CyclePosition> = positions.iter().filter(|p| !p.redeemed).collect();
+    match serde_json::to_string_pretty(&active) {
+        Ok(json) => {
+            let tmp = format!("{}.tmp", POSITIONS_FILE);
+            if let Err(e) = std::fs::write(&tmp, &json) {
+                warn!("💾 Failed to write positions tmp file: {}", e);
+                return;
+            }
+            if let Err(e) = std::fs::rename(&tmp, POSITIONS_FILE) {
+                warn!("💾 Failed to rename positions file: {}", e);
+                return;
+            }
+            debug!("💾 Saved {} active positions to {}", active.len(), POSITIONS_FILE);
+        }
+        Err(e) => warn!("💾 Failed to serialize positions: {}", e),
+    }
+}
+
+/// Load positions from disk. Returns empty vec if file doesn't exist or is corrupt.
+fn load_positions() -> Vec<CyclePosition> {
+    let path = std::path::Path::new(POSITIONS_FILE);
+    if !path.exists() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(json) => {
+            match serde_json::from_str::<Vec<CyclePosition>>(&json) {
+                Ok(positions) => {
+                    let active: Vec<CyclePosition> = positions.into_iter()
+                        .filter(|p| !p.redeemed)
+                        .collect();
+                    info!("💾 Loaded {} positions from {}", active.len(), POSITIONS_FILE);
+                    active
+                }
+                Err(e) => {
+                    warn!("💾 Failed to parse {}: {} — starting fresh", POSITIONS_FILE, e);
+                    Vec::new()
+                }
+            }
+        }
+        Err(e) => {
+            warn!("💾 Failed to read {}: {} — starting fresh", POSITIONS_FILE, e);
+            Vec::new()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 /// A discovered Up/Down market pair ready for arbitrage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ArbMarket {
     /// Human-readable title, e.g. "Bitcoin Up or Down - February 10, 1AM ET"
     pub title: String,
@@ -119,7 +175,7 @@ pub struct ArbMarket {
     pub down_fee_bps: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArbAsset {
     BTC,
     ETH,
@@ -139,7 +195,7 @@ impl ArbAsset {
 }
 
 /// Tracks our position in a single market cycle.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct CyclePosition {
     market: ArbMarket,
     up_tokens_bought: f64,
@@ -219,6 +275,33 @@ struct MergeResult {
     error: Option<String>,
 }
 
+/// Result from a background arb execution task (signing + order submission).
+/// Sent back to the main event loop so capital/positions can be updated without
+/// blocking the hot path.
+#[derive(Debug)]
+struct ExecResult {
+    event_slug: String,
+    market: ArbMarket,
+    asset_label: &'static str,
+    /// Capital we pre-deducted before spawning (refunded on failure or partial fill)
+    estimated_cost: f64,
+    // Actual fill results
+    up_tokens_total: f64,
+    down_tokens_total: f64,
+    up_cost_total: f64,
+    down_cost_total: f64,
+    up_orders_ok: u32,
+    down_orders_ok: u32,
+    up_signals_count: usize,
+    down_signals_count: usize,
+    // Timing
+    sign_elapsed_ms: f64,
+    submit_elapsed_ms: f64,
+    total_elapsed_ms: f64,
+    /// Error if signing/submission completely failed
+    error: Option<String>,
+}
+
 /// A computed arb opportunity with execution plan.
 #[derive(Debug, Clone)]
 struct ArbOpportunity {
@@ -293,6 +376,10 @@ pub struct ArbEngine {
     merge_rx: mpsc::Receiver<MergeResult>,
     /// Sender for background merge/redeem tasks (cloned into spawned tasks).
     merge_tx: mpsc::Sender<MergeResult>,
+    /// Receiver for background execution (sign + submit) completion.
+    exec_rx: mpsc::Receiver<ExecResult>,
+    /// Sender for background execution tasks (cloned into spawned tasks).
+    exec_tx: mpsc::Sender<ExecResult>,
     /// Cache of event_id → parsed ArbMarkets to avoid re-fetching known events.
     /// Dramatically reduces scan_markets latency from ~7s to <1s after first scan.
     event_detail_cache: HashMap<String, Vec<ArbMarket>>,
@@ -321,6 +408,8 @@ impl ArbEngine {
         let (ws_cmd_tx, ws_cmd_rx) = mpsc::channel::<WsCommand>(64);
         // Channel for background merge/redeem completion notifications
         let (merge_tx, merge_rx) = mpsc::channel::<MergeResult>(32);
+        // Channel for background execution (sign + submit) completion
+        let (exec_tx, exec_rx) = mpsc::channel::<ExecResult>(32);
 
         // Spawn the WebSocket book watcher task
         let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -329,13 +418,39 @@ impl ArbEngine {
             run_book_watcher(ws_event_tx, ws_cmd_rx, shutdown_for_ws).await;
         });
 
+        // Load persisted positions and adjust available capital
+        let mut recovered_positions = load_positions();
+        let now_ts = chrono::Utc::now().timestamp();
+        recovered_positions.retain(|p| p.market.event_end_ts > now_ts - 600);
+        let deployed: f64 = recovered_positions.iter().map(|p| p.total_cost).sum();
+        if !recovered_positions.is_empty() {
+            info!("💾 Recovered {} positions (${:.2} deployed) from disk", recovered_positions.len(), deployed);
+        }
+        // Clamp to 0 — wallet balance may have decreased between restarts
+        let adjusted_capital = (capital_usdc - deployed).max(0.0);
+
+        // Re-populate tracked_markets, asset_to_market, and pending WS subscriptions
+        // from recovered positions so the engine can manage them after restart.
+        let mut tracked_markets = HashMap::new();
+        let mut asset_to_market = HashMap::new();
+        let mut ws_subscribed = std::collections::HashSet::new();
+        for pos in &recovered_positions {
+            let m = &pos.market;
+            let slug = m.event_slug.clone();
+            asset_to_market.insert(m.up_token_id.clone(), slug.clone());
+            asset_to_market.insert(m.down_token_id.clone(), slug.clone());
+            ws_subscribed.insert(m.up_token_id.clone());
+            ws_subscribed.insert(m.down_token_id.clone());
+            tracked_markets.insert(slug, m.clone());
+        }
+
         Self {
             config,
             executor,
             token_registry,
             client,
-            positions: Vec::new(),
-            capital_usdc,
+            positions: recovered_positions,
+            capital_usdc: adjusted_capital,
             max_per_cycle,
             shutdown: shutdown_flag,
             total_pnl: 0.0,
@@ -343,13 +458,15 @@ impl ArbEngine {
             book_cache: HashMap::new(),
             ws_rx,
             ws_cmd_tx,
-            tracked_markets: HashMap::new(),
-            asset_to_market: HashMap::new(),
-            ws_subscribed: std::collections::HashSet::new(),
+            tracked_markets,
+            asset_to_market,
+            ws_subscribed,
             ws_connected: false,
             executing_slugs: std::collections::HashSet::new(),
             merge_rx,
             merge_tx,
+            exec_rx,
+            exec_tx,
             event_detail_cache: HashMap::new(),
         }
     }
@@ -376,6 +493,15 @@ impl ArbEngine {
         info!("   Strategy: Buy both Up+Down when spread > {:.1}% (max pair cost ${:.3})", (1.0 - MAX_PAIR_COST) * 100.0, MAX_PAIR_COST);
         info!("   Targets: BTC/ETH/SOL/XRP × 1hr+15m | {}s scan | {}s pre-sub | parallel execution",
               MARKET_SCAN_INTERVAL_SECS, PRE_MARKET_LEAD_SECS);
+
+        // If we recovered positions from disk, send their asset IDs to the WS task
+        // so it subscribes on connect. Without this, the WS task wouldn't know about
+        // recovered positions and we'd miss book updates needed for merge/redeem.
+        if !self.ws_subscribed.is_empty() {
+            let ids: Vec<String> = self.ws_subscribed.iter().cloned().collect();
+            info!("💾 Sending {} recovered asset IDs to WS for subscription", ids.len());
+            let _ = self.ws_cmd_tx.send(WsCommand::Subscribe(ids)).await;
+        }
 
         // Market discovery timer — REST poll Gamma API for new events
         let mut scan_interval = tokio::time::interval(
@@ -433,6 +559,16 @@ impl ArbEngine {
                 merge_result = self.merge_rx.recv() => {
                     if let Some(result) = merge_result {
                         self.handle_merge_result(result);
+                    }
+                }
+
+                // ── Background execution (sign + submit) completion ──────
+                // Non-blocking: order signing and HTTP submission run in
+                // spawned tasks so the event loop processes WS events
+                // continuously. This is the key speed optimization.
+                exec_result = self.exec_rx.recv() => {
+                    if let Some(result) = exec_result {
+                        self.handle_exec_result(result);
                     }
                 }
 
@@ -556,12 +692,9 @@ impl ArbEngine {
                 metrics::ARB_OPPORTUNITIES_DETECTED.with_label_values(&[asset_lbl, "ws"]).inc();
                 metrics::ARB_AVAILABLE_PAIRS.with_label_values(&[asset_lbl]).set(opp.total_pairs);
 
-                // Set short-lived re-entry guard during order submission
+                // Set re-entry guard — cleared in handle_exec_result when task completes
                 self.executing_slugs.insert(market.event_slug.clone());
-                self.execute_arb(&market, opp).await;
-                // Always clear the guard immediately — we no longer tie it to merge lifecycle.
-                // The guard only prevents concurrent order submissions for the same market.
-                self.executing_slugs.remove(&market.event_slug);
+                self.execute_arb(&market, opp);
             }
             None => {
                 metrics::ARB_AVAILABLE_PAIRS.with_label_values(&[asset_lbl]).set(0.0);
@@ -654,8 +787,7 @@ impl ArbEngine {
                 metrics::ARB_AVAILABLE_PAIRS.with_label_values(&[asset_lbl]).set(opp.total_pairs);
 
                 self.executing_slugs.insert(market.event_slug.clone());
-                self.execute_arb(&market, opp).await;
-                self.executing_slugs.remove(&market.event_slug);
+                self.execute_arb(&market, opp);
             }
             None => {}
         }
@@ -730,6 +862,96 @@ impl ArbEngine {
                 self.positions[pos_idx].redeemed = true;
                 self.positions.remove(pos_idx);
             }
+            save_positions(&self.positions);
+        }
+    }
+
+    /// Handle completion of a background execution (sign + submit) task.
+    /// Updates capital, positions, and metrics based on actual fill results.
+    fn handle_exec_result(&mut self, result: ExecResult) {
+        // Always clear the executing guard so the market can be re-entered
+        self.executing_slugs.remove(&result.event_slug);
+
+        if let Some(ref err) = result.error {
+            // Refund all pre-deducted capital
+            self.capital_usdc += result.estimated_cost;
+            warn!("   ❌ Execution failed for {}: {} — capital refunded ${:.2}",
+                  result.event_slug, err, result.estimated_cost);
+            metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["exec_failed"]).inc();
+            return;
+        }
+
+        let actual_cost = result.up_cost_total + result.down_cost_total;
+        let min_tokens = result.up_tokens_total.min(result.down_tokens_total);
+        let expected_profit = min_tokens - actual_cost;
+
+        // Refund the difference between estimated and actual cost
+        // (partial fills use less capital than we reserved)
+        self.capital_usdc += result.estimated_cost - actual_cost;
+
+        // Metrics
+        let lbl = result.asset_label;
+        metrics::ARB_ORDERS_SUBMITTED.with_label_values(&[lbl, "up"]).inc_by(result.up_signals_count as u64);
+        metrics::ARB_ORDERS_SUBMITTED.with_label_values(&[lbl, "down"]).inc_by(result.down_signals_count as u64);
+        metrics::ARB_ORDERS_FILLED.with_label_values(&[lbl, "up"]).inc_by(result.up_orders_ok as u64);
+        metrics::ARB_ORDERS_FILLED.with_label_values(&[lbl, "down"]).inc_by(result.down_orders_ok as u64);
+        let up_failed = result.up_signals_count as u64 - result.up_orders_ok as u64;
+        let down_failed = result.down_signals_count as u64 - result.down_orders_ok as u64;
+        if up_failed > 0 { metrics::ARB_ORDERS_FAILED.with_label_values(&[lbl, "up"]).inc_by(up_failed); }
+        if down_failed > 0 { metrics::ARB_ORDERS_FAILED.with_label_values(&[lbl, "down"]).inc_by(down_failed); }
+        if result.up_tokens_total > 0.0 { metrics::ARB_TOKENS_BOUGHT.with_label_values(&[lbl, "up"]).inc_by(result.up_tokens_total); }
+        if result.down_tokens_total > 0.0 { metrics::ARB_TOKENS_BOUGHT.with_label_values(&[lbl, "down"]).inc_by(result.down_tokens_total); }
+        if result.up_cost_total > 0.0 { metrics::ARB_USDC_SPENT.with_label_values(&[lbl, "up"]).inc_by(result.up_cost_total); }
+        if result.down_cost_total > 0.0 { metrics::ARB_USDC_SPENT.with_label_values(&[lbl, "down"]).inc_by(result.down_cost_total); }
+        if actual_cost > 0.0 {
+            metrics::ARB_AVG_PAIR_COST.observe(actual_cost / min_tokens.max(1.0));
+        }
+        metrics::ARB_EXECUTION_LATENCY.with_label_values(&["total"]).observe(result.total_elapsed_ms / 1000.0);
+        metrics::ARB_EXECUTION_LATENCY.with_label_values(&["signing"]).observe(result.sign_elapsed_ms / 1000.0);
+        metrics::ARB_EXECUTION_LATENCY.with_label_values(&["submission"]).observe(result.submit_elapsed_ms / 1000.0);
+
+        info!("   📊 RESULT: Up {}/{} orders ({:.0} tokens ${:.2}) | Down {}/{} orders ({:.0} tokens ${:.2}) | {:.0}ms",
+              result.up_orders_ok, result.up_signals_count, result.up_tokens_total, result.up_cost_total,
+              result.down_orders_ok, result.down_signals_count, result.down_tokens_total, result.down_cost_total,
+              result.total_elapsed_ms);
+
+        if result.up_tokens_total > 0.0 || result.down_tokens_total > 0.0 {
+            if result.up_tokens_total > 0.0 && result.down_tokens_total > 0.0 {
+                info!("   🎯 ARB FILLED: ${:.2} deployed, {:.0} pairs, expected profit ${:.2}",
+                      actual_cost, min_tokens, expected_profit);
+            } else {
+                warn!("   ⚠️  PARTIAL FILL: Up={:.0} tokens, Down={:.0} tokens — will balance on next opportunity",
+                      result.up_tokens_total, result.down_tokens_total);
+            }
+            metrics::ARB_OPPORTUNITIES_EXECUTED.with_label_values(&[lbl]).inc();
+
+            // ACCUMULATE into existing position or create new one
+            if let Some(pos) = self.positions.iter_mut().find(|p| p.market.event_slug == result.event_slug && !p.redeemed) {
+                pos.up_tokens_bought += result.up_tokens_total;
+                pos.down_tokens_bought += result.down_tokens_total;
+                pos.up_cost_usdc += result.up_cost_total;
+                pos.down_cost_usdc += result.down_cost_total;
+                pos.total_cost += actual_cost;
+                let new_min = pos.up_tokens_bought.min(pos.down_tokens_bought);
+                pos.expected_profit = new_min - pos.total_cost;
+                info!("   📦 ACCUMULATED: total {:.0} Up + {:.0} Down ({:.0} pairs) | ${:.2} deployed",
+                      pos.up_tokens_bought, pos.down_tokens_bought, new_min, pos.total_cost);
+            } else {
+                self.positions.push(CyclePosition {
+                    market: result.market,
+                    up_tokens_bought: result.up_tokens_total,
+                    down_tokens_bought: result.down_tokens_total,
+                    up_cost_usdc: result.up_cost_total,
+                    down_cost_usdc: result.down_cost_total,
+                    total_cost: actual_cost,
+                    expected_profit,
+                    entered_at: chrono::Utc::now(),
+                    redeemed: false,
+                });
+            }
+            save_positions(&self.positions);
+        } else {
+            error!("   ❌ ALL ORDERS FAILED — no position entered");
         }
     }
 
@@ -867,8 +1089,7 @@ impl ArbEngine {
                     metrics::ARB_OPPORTUNITIES_DETECTED.with_label_values(&[market.asset.label(), "rest"]).inc();
 
                     self.executing_slugs.insert(market.event_slug.clone());
-                    self.execute_arb(&market, opp).await;
-                    self.executing_slugs.remove(&market.event_slug);
+                    self.execute_arb(&market, opp);
                 }
                 Ok(None) => {}
                 Err(e) => { warn!("Failed to check arb for {}: {}", market.title, e); }
@@ -1499,98 +1720,56 @@ impl ArbEngine {
 
     /// Execute the arbitrage: sweep both Up and Down order books.
     ///
-    /// Like Account88888, we fire orders at EVERY profitable price level,
-    /// not just the best ask. This maximizes the number of pairs we accumulate.
+    /// NON-BLOCKING: This method does fast inline prep (<1ms) then spawns
+    /// the signing + HTTP submission as a background task. The event loop
+    /// stays responsive for other WS events and markets. Results arrive
+    /// via exec_rx and are handled in handle_exec_result().
     ///
-    /// Accumulates into existing positions. Merge is deferred to check_and_redeem().
-    async fn execute_arb(
+    /// IMPORTANT: Caller must insert executing_slugs BEFORE calling this.
+    /// The slug is cleared in handle_exec_result() when the task completes.
+    fn execute_arb(
         &mut self,
         market: &ArbMarket,
         opp: ArbOpportunity,
     ) {
         let asset_lbl = market.asset.label();
-        let exec_start = std::time::Instant::now();
 
-        // Capital check — capital_usdc tracks actual available USDC (deducted on entry, added on redemption)
+        // ── Capital check ────────────────────────────────────────────────
         let available_capital = self.capital_usdc;
         let effective_capital = available_capital.min(self.max_per_cycle);
 
         if effective_capital < opp.total_cost {
-            // Scale down to what we can afford
             let scale = effective_capital / opp.total_cost;
             if scale < MIN_ORDER_SIZE / opp.total_pairs {
                 warn!("Insufficient capital: ${:.2} available, need ${:.2}", effective_capital, opp.total_cost);
                 metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["insufficient_capital"]).inc();
+                self.executing_slugs.remove(&market.event_slug);
                 return;
             }
-            info!("   Scaling to {:.0}% of opportunity (capital limited)", scale * 100.0);
-            // We'll cap individual order sizes below
         }
 
         let spread_pct = (1.0 - opp.avg_pair_cost) * 100.0;
         info!("🚀 EXECUTING ARB: {} | {:.0} pairs across {} levels | spread {:.2}%",
               market.title, opp.total_pairs, opp.up_orders.len() + opp.down_orders.len(), spread_pct);
 
-        // ── FRESH BOOK FETCH ─────────────────────────────────────────────
-        // The WS-triggered opportunity was detected on cached depth data.
-        // By the time we get here (~1-5ms later), levels may have been consumed.
-        // Fetch fresh books via REST (~30-50ms) and re-run the sweep to get
-        // accurate, up-to-date depth for order building. IOC orders protect us
-        // from stale levels, but fresh data means fewer wasted order slots.
-        //
-        // OPTIMIZATION: Skip the REST fetch if BOTH cached books were updated
-        // within the last 200ms via WS. The WS data is actually MORE current
-        // than a REST fetch (which adds 30-50ms of round-trip latency).
-        // This saves ~30-50ms on the critical execution path.
-        let ws_fresh = {
-            let up_age = self.book_cache.get(&market.up_token_id)
-                .map(|b| b.updated_at.elapsed());
-            let down_age = self.book_cache.get(&market.down_token_id)
-                .map(|b| b.updated_at.elapsed());
-            matches!((up_age, down_age), (Some(u), Some(d))
-                if u.as_millis() < 500 && d.as_millis() < 500)
-        };
-
-        let opp = if ws_fresh {
-            debug!("   ⚡ WS books fresh (<500ms) — skipping REST fetch");
-            opp
-        } else {
-            debug!("   ⚡ WS books stale — TRUSTING CACHED DATA for speed");
-            opp
-        }; // close if ws_fresh { ... } else { ... }
-
-        // Re-check capital against potentially updated opportunity
-        let effective_capital = available_capital.min(self.max_per_cycle);
-        if effective_capital < opp.total_cost {
-            let scale = effective_capital / opp.total_cost;
-            if scale < MIN_ORDER_SIZE / opp.total_pairs {
-                warn!("Insufficient capital after fresh book: ${:.2} available, need ${:.2}", effective_capital, opp.total_cost);
-                metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["insufficient_capital"]).inc();
-                return;
-            }
-        }
-
-        // Token info was pre-registered during discover_and_subscribe — no HTTP calls needed here.
+        // ── Build order signals (fast, in-memory, <1ms) ──────────────────
         let up_hash = hash_asset_id(&market.up_token_id);
         let down_hash = hash_asset_id(&market.down_token_id);
         let up_market_id = MarketId { token_id: up_hash, condition_id: [0u8; 32] };
         let down_market_id = MarketId { token_id: down_hash, condition_id: [0u8; 32] };
 
-        // Build all order signals — one per price level per side
-        let mut up_signals = Vec::new();
-        let mut down_signals = Vec::new();
-        let mut remaining_capital = effective_capital;
-
-        // Fee multipliers for capital budgeting
         let up_fee_mult = 1.0 + market.up_fee_bps as f64 / 10000.0;
         let down_fee_mult = 1.0 + market.down_fee_bps as f64 / 10000.0;
 
-        // Scale orders to fit within capital
         let capital_scale = if opp.total_cost > effective_capital {
             effective_capital / opp.total_cost
         } else {
             1.0
         };
+
+        let mut up_signals = Vec::new();
+        let mut down_signals = Vec::new();
+        let mut remaining_capital = effective_capital;
 
         for level in &opp.up_orders {
             let scaled_size = level.size * capital_scale;
@@ -1640,16 +1819,16 @@ impl ArbEngine {
 
         if up_signals.is_empty() || down_signals.is_empty() {
             warn!("No valid orders after capital scaling — skipping");
+            self.executing_slugs.remove(&market.event_slug);
             return;
         }
 
-        let total_signals = up_signals.len() + down_signals.len();
-        info!("   Signing {} Up + {} Down orders for batch submission...",
-              up_signals.len(), down_signals.len());
+        // ── Deduct capital optimistically and spawn background task ──────
+        // The estimated cost is refunded/adjusted in handle_exec_result()
+        // based on actual fill amounts.
+        let estimated_cost = effective_capital - remaining_capital;
+        self.capital_usdc -= estimated_cost;
 
-        // ── STEP 1: Sign all orders in parallel ──────────────────────────
-        // Each order needs a unique EIP-712 signature. We sign Up and Down
-        // concurrently to minimize wall-clock time.
         let up_token_str = market.up_token_id.clone();
         let down_token_str = market.down_token_id.clone();
         let up_neg_risk = self.token_registry.is_neg_risk(up_hash);
@@ -1657,157 +1836,27 @@ impl ArbEngine {
         let up_fee = self.token_registry.fee_rate_bps(up_hash);
         let down_fee = self.token_registry.fee_rate_bps(down_hash);
 
-        let sign_start = std::time::Instant::now();
+        info!("   ⚡ Spawning background exec: {} Up + {} Down orders (${:.2} reserved)",
+              up_signals.len(), down_signals.len(), estimated_cost);
 
-        // Sign all Up orders
-        let up_sign_futures: Vec<_> = up_signals.iter().map(|sig| {
-            self.executor.signer().prepare_order_full(
-                sig.market_id, sig.side, sig.price, sig.size,
-                sig.order_type, TimeInForce::IOC, 0,
-                up_token_str.clone(), up_neg_risk, up_fee,
-            )
-        }).collect();
+        let exec_tx = self.exec_tx.clone();
+        let executor = self.executor.clone();
+        let market_clone = market.clone();
+        let event_slug = market.event_slug.clone();
 
-        // Sign all Down orders
-        let down_sign_futures: Vec<_> = down_signals.iter().map(|sig| {
-            self.executor.signer().prepare_order_full(
-                sig.market_id, sig.side, sig.price, sig.size,
-                sig.order_type, TimeInForce::IOC, 0,
-                down_token_str.clone(), down_neg_risk, down_fee,
-            )
-        }).collect();
+        tokio::spawn(async move {
+            let result = sign_and_submit_orders(
+                executor, up_signals, down_signals,
+                up_token_str, down_token_str,
+                up_neg_risk, down_neg_risk,
+                up_fee, down_fee,
+                market_clone, event_slug, asset_lbl,
+                estimated_cost,
+            ).await;
+            let _ = exec_tx.send(result).await;
+        });
 
-        // Execute all signing concurrently
-        let (up_signed, down_signed) = tokio::join!(
-            futures_util::future::join_all(up_sign_futures),
-            futures_util::future::join_all(down_sign_futures),
-        );
-
-        let sign_elapsed = sign_start.elapsed();
-        info!("   Signed {} orders in {:.1}ms", total_signals, sign_elapsed.as_secs_f64() * 1000.0);
-        metrics::ARB_EXECUTION_LATENCY.with_label_values(&["signing"]).observe(sign_elapsed.as_secs_f64());
-
-        // Collect successfully signed orders for parallel submission
-        let mut up_ok: Vec<PreparedOrder> = Vec::new();
-        let mut down_ok: Vec<PreparedOrder> = Vec::new();
-
-        for (i, result) in up_signed.into_iter().enumerate() {
-            match result {
-                Ok(order) => up_ok.push(order),
-                Err(e) => warn!("   ❌ Up #{} sign failed: {}", i + 1, e),
-            }
-        }
-        for (i, result) in down_signed.into_iter().enumerate() {
-            match result {
-                Ok(order) => down_ok.push(order),
-                Err(e) => warn!("   ❌ Down #{} sign failed: {}", i + 1, e),
-            }
-        }
-
-        if up_ok.is_empty() || down_ok.is_empty() {
-            warn!("Signing failed for one side — aborting arb (need both sides)");
-            metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["signing_failed"]).inc();
-            return;
-        }
-
-        // ── STEP 2: Submit Up and Down batches IN PARALLEL ───────────────
-        // Instead of interleaving into one serial stream, we fire Up and Down
-        // as two independent parallel batch streams. This cuts submission
-        // latency roughly in half — critical for catching early spreads.
-        let submit_start = std::time::Instant::now();
-
-        // Fire Up and Down batch streams in parallel
-        let executor_ref = &*self.executor;
-        let up_count = up_ok.len();
-        let down_count = down_ok.len();
-        let ((up_orders_ok, up_tokens_total, up_cost_total),
-             (down_orders_ok, down_tokens_total, down_cost_total)) = tokio::join!(
-            submit_order_side(executor_ref, up_ok, "Up"),
-            submit_order_side(executor_ref, down_ok, "Down"),
-        );
-
-        let submit_elapsed = submit_start.elapsed();
-        let up_batches = (up_count + 14) / 15;
-        let down_batches = (down_count + 14) / 15;
-        info!("   Submitted {} orders in {:.0}ms ({} Up + {} Down batches, parallel)",
-              total_signals, submit_elapsed.as_secs_f64() * 1000.0,
-              up_batches, down_batches);
-        metrics::ARB_EXECUTION_LATENCY.with_label_values(&["submission"]).observe(submit_elapsed.as_secs_f64());
-
-        let total_cost = up_cost_total + down_cost_total;
-        let min_tokens = up_tokens_total.min(down_tokens_total);
-        let expected_profit = min_tokens - total_cost; // Each pair redeems at $1
-
-        // Track execution metrics
-        metrics::ARB_ORDERS_SUBMITTED.with_label_values(&[asset_lbl, "up"]).inc_by(up_signals.len() as u64);
-        metrics::ARB_ORDERS_SUBMITTED.with_label_values(&[asset_lbl, "down"]).inc_by(down_signals.len() as u64);
-        metrics::ARB_ORDERS_FILLED.with_label_values(&[asset_lbl, "up"]).inc_by(up_orders_ok as u64);
-        metrics::ARB_ORDERS_FILLED.with_label_values(&[asset_lbl, "down"]).inc_by(down_orders_ok as u64);
-        let up_failed = up_signals.len() as u64 - up_orders_ok as u64;
-        let down_failed = down_signals.len() as u64 - down_orders_ok as u64;
-        if up_failed > 0 { metrics::ARB_ORDERS_FAILED.with_label_values(&[asset_lbl, "up"]).inc_by(up_failed); }
-        if down_failed > 0 { metrics::ARB_ORDERS_FAILED.with_label_values(&[asset_lbl, "down"]).inc_by(down_failed); }
-        if up_tokens_total > 0.0 { metrics::ARB_TOKENS_BOUGHT.with_label_values(&[asset_lbl, "up"]).inc_by(up_tokens_total); }
-        if down_tokens_total > 0.0 { metrics::ARB_TOKENS_BOUGHT.with_label_values(&[asset_lbl, "down"]).inc_by(down_tokens_total); }
-        if up_cost_total > 0.0 { metrics::ARB_USDC_SPENT.with_label_values(&[asset_lbl, "up"]).inc_by(up_cost_total); }
-        if down_cost_total > 0.0 { metrics::ARB_USDC_SPENT.with_label_values(&[asset_lbl, "down"]).inc_by(down_cost_total); }
-        if total_cost > 0.0 {
-            metrics::ARB_AVG_PAIR_COST.observe(total_cost / min_tokens.max(1.0));
-        }
-        let total_exec = exec_start.elapsed();
-        metrics::ARB_EXECUTION_LATENCY.with_label_values(&["total"]).observe(total_exec.as_secs_f64());
-
-        info!("   📊 RESULT: Up {}/{} orders ({:.0} tokens ${:.2}) | Down {}/{} orders ({:.0} tokens ${:.2})",
-              up_orders_ok, up_signals.len(), up_tokens_total, up_cost_total,
-              down_orders_ok, down_signals.len(), down_tokens_total, down_cost_total);
-
-        if up_orders_ok > 0 || down_orders_ok > 0 {
-            if up_orders_ok > 0 && down_orders_ok > 0 {
-                info!("   🎯 ARB FILLED: ${:.2} deployed, {:.0} pairs, expected profit ${:.2}",
-                      total_cost, min_tokens, expected_profit);
-            } else {
-                warn!("   ⚠️  PARTIAL FILL: Up={} Down={} — will balance on next opportunity",
-                      up_orders_ok, down_orders_ok);
-            }
-            metrics::ARB_OPPORTUNITIES_EXECUTED.with_label_values(&[asset_lbl]).inc();
-
-            self.capital_usdc -= total_cost;
-
-            // ACCUMULATE into existing position or create new one.
-            // Merge is DEFERRED until the entry window closes — we keep buying
-            // as long as spreads are favorable, just like account88888.
-            if let Some(pos) = self.positions.iter_mut().find(|p| p.market.event_slug == market.event_slug && !p.redeemed) {
-                // Accumulate into existing position
-                pos.up_tokens_bought += up_tokens_total;
-                pos.down_tokens_bought += down_tokens_total;
-                pos.up_cost_usdc += up_cost_total;
-                pos.down_cost_usdc += down_cost_total;
-                pos.total_cost += total_cost;
-                let new_min = pos.up_tokens_bought.min(pos.down_tokens_bought);
-                pos.expected_profit = new_min - pos.total_cost;
-                info!("   📦 ACCUMULATED: total {:.0} Up + {:.0} Down ({:.0} pairs) | ${:.2} deployed",
-                      pos.up_tokens_bought, pos.down_tokens_bought, new_min, pos.total_cost);
-            } else {
-                // First entry — create new position
-                self.positions.push(CyclePosition {
-                    market: market.clone(),
-                    up_tokens_bought: up_tokens_total,
-                    down_tokens_bought: down_tokens_total,
-                    up_cost_usdc: up_cost_total,
-                    down_cost_usdc: down_cost_total,
-                    total_cost,
-                    expected_profit,
-                    entered_at: chrono::Utc::now(),
-                    redeemed: false,
-                });
-            }
-
-            // NOTE: Merge is NOT triggered here. It happens in check_and_redeem()
-            // once the entry window has closed. This allows continuous accumulation
-            // throughout the market window, matching account88888's strategy.
-        } else {
-            error!("   ❌ ALL ORDERS FAILED — no position entered");
-        }
+        // Returns immediately — event loop is free to process other WS events!
     }
 
     // -----------------------------------------------------------------------
@@ -2353,6 +2402,121 @@ impl ArbEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Background execution: sign + submit (runs as spawned task)
+// ---------------------------------------------------------------------------
+
+/// Sign and submit orders for both sides. Runs in a spawned tokio task so the
+/// main event loop stays responsive. Returns an ExecResult sent back via channel.
+async fn sign_and_submit_orders(
+    executor: Arc<OrderExecutor>,
+    up_signals: Vec<crate::types::TradeSignal>,
+    down_signals: Vec<crate::types::TradeSignal>,
+    up_token_str: String,
+    down_token_str: String,
+    up_neg_risk: bool,
+    down_neg_risk: bool,
+    up_fee: u32,
+    down_fee: u32,
+    market: ArbMarket,
+    event_slug: String,
+    asset_label: &'static str,
+    estimated_cost: f64,
+) -> ExecResult {
+    let exec_start = std::time::Instant::now();
+    let up_signals_count = up_signals.len();
+    let down_signals_count = down_signals.len();
+    let total_signals = up_signals_count + down_signals_count;
+
+    info!("   📝 [BG] Signing {} orders ({} Up + {} Down)...",
+          total_signals, up_signals_count, down_signals_count);
+
+    // ── STEP 1: Sign all orders concurrently ─────────────────────────
+    let sign_start = std::time::Instant::now();
+
+    let up_sign_futures: Vec<_> = up_signals.iter().map(|sig| {
+        executor.signer().prepare_order_full(
+            sig.market_id, sig.side, sig.price, sig.size,
+            sig.order_type, TimeInForce::IOC, 0,
+            up_token_str.clone(), up_neg_risk, up_fee,
+        )
+    }).collect();
+
+    let down_sign_futures: Vec<_> = down_signals.iter().map(|sig| {
+        executor.signer().prepare_order_full(
+            sig.market_id, sig.side, sig.price, sig.size,
+            sig.order_type, TimeInForce::IOC, 0,
+            down_token_str.clone(), down_neg_risk, down_fee,
+        )
+    }).collect();
+
+    let (up_signed, down_signed) = tokio::join!(
+        futures_util::future::join_all(up_sign_futures),
+        futures_util::future::join_all(down_sign_futures),
+    );
+
+    let sign_elapsed = sign_start.elapsed();
+    info!("   [BG] Signed {} orders in {:.1}ms", total_signals, sign_elapsed.as_secs_f64() * 1000.0);
+
+    let mut up_ok: Vec<PreparedOrder> = Vec::new();
+    let mut down_ok: Vec<PreparedOrder> = Vec::new();
+
+    for res in up_signed { if let Ok(order) = res { up_ok.push(order); } }
+    for res in down_signed { if let Ok(order) = res { down_ok.push(order); } }
+
+    if up_ok.is_empty() || down_ok.is_empty() {
+        return ExecResult {
+            event_slug,
+            market,
+            asset_label,
+            estimated_cost,
+            up_tokens_total: 0.0,
+            down_tokens_total: 0.0,
+            up_cost_total: 0.0,
+            down_cost_total: 0.0,
+            up_orders_ok: 0,
+            down_orders_ok: 0,
+            up_signals_count,
+            down_signals_count,
+            sign_elapsed_ms: sign_elapsed.as_secs_f64() * 1000.0,
+            submit_elapsed_ms: 0.0,
+            total_elapsed_ms: exec_start.elapsed().as_secs_f64() * 1000.0,
+            error: Some("Signing failed for one side".to_string()),
+        };
+    }
+
+    // ── STEP 2: Submit Up and Down batches IN PARALLEL ───────────────
+    let submit_start = std::time::Instant::now();
+
+    let ((up_orders_ok, up_tokens_total, up_cost_total),
+         (down_orders_ok, down_tokens_total, down_cost_total)) = tokio::join!(
+        submit_order_side(&executor, up_ok, "Up"),
+        submit_order_side(&executor, down_ok, "Down"),
+    );
+
+    let submit_elapsed = submit_start.elapsed();
+    info!("   [BG] Submitted {} orders in {:.0}ms", total_signals, submit_elapsed.as_secs_f64() * 1000.0);
+
+    ExecResult {
+        event_slug,
+        market,
+        asset_label,
+        estimated_cost,
+        up_tokens_total,
+        down_tokens_total,
+        up_cost_total,
+        down_cost_total,
+        up_orders_ok,
+        down_orders_ok,
+        up_signals_count,
+        down_signals_count,
+        sign_elapsed_ms: sign_elapsed.as_secs_f64() * 1000.0,
+        submit_elapsed_ms: submit_elapsed.as_secs_f64() * 1000.0,
+        total_elapsed_ms: exec_start.elapsed().as_secs_f64() * 1000.0,
+        error: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parallel order submission helper
 // ---------------------------------------------------------------------------
 
@@ -2368,7 +2532,7 @@ async fn submit_order_side(
     use rust_decimal::prelude::ToPrimitive;
 
     const BATCH_LIMIT: usize = 15;
-    const INTER_BATCH_DELAY_MS: u64 = 5;
+    const INTER_BATCH_DELAY_MS: u64 = 1;
 
     let mut orders_ok = 0u32;
     let mut tokens_total = 0.0_f64;

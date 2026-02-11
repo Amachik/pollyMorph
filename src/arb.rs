@@ -1548,50 +1548,15 @@ impl ArbEngine {
             let down_age = self.book_cache.get(&market.down_token_id)
                 .map(|b| b.updated_at.elapsed());
             matches!((up_age, down_age), (Some(u), Some(d))
-                if u.as_millis() < 200 && d.as_millis() < 200)
+                if u.as_millis() < 500 && d.as_millis() < 500)
         };
 
         let opp = if ws_fresh {
-            debug!("   ⚡ WS books fresh (<200ms) — skipping REST fetch");
+            debug!("   ⚡ WS books fresh (<500ms) — skipping REST fetch");
             opp
         } else {
-        match self.fetch_both_books(&market.up_token_id, &market.down_token_id).await {
-            Ok((fresh_up, fresh_down)) => {
-                // Update cache with fresh data
-                self.book_cache.insert(market.up_token_id.clone(), fresh_up.clone());
-                self.book_cache.insert(market.down_token_id.clone(), fresh_down.clone());
-
-                // Re-run sweep on fresh books
-                match self.find_arb_pairs(market, &fresh_up, &fresh_down) {
-                    Some(fresh_opp) => {
-                        if fresh_opp.total_pairs < MIN_ORDER_SIZE {
-                            info!("   📉 Fresh books: opportunity vanished (< {:.0} pairs)", MIN_ORDER_SIZE);
-                            metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["stale_opportunity"]).inc();
-                            return;
-                        }
-                        let fresh_spread = (1.0 - fresh_opp.avg_pair_cost) * 100.0;
-                        if fresh_opp.total_pairs < opp.total_pairs * 0.5 {
-                            info!("   📉 Fresh books: {:.0} → {:.0} pairs ({:.2}% spread) — significantly reduced",
-                                  opp.total_pairs, fresh_opp.total_pairs, fresh_spread);
-                        } else {
-                            debug!("   📊 Fresh books: {:.0} → {:.0} pairs ({:.2}% spread)",
-                                   opp.total_pairs, fresh_opp.total_pairs, fresh_spread);
-                        }
-                        fresh_opp
-                    }
-                    None => {
-                        info!("   📉 Fresh books: no opportunity remaining — aborting");
-                        metrics::ARB_OPPORTUNITIES_SKIPPED.with_label_values(&["stale_opportunity"]).inc();
-                        return;
-                    }
-                }
-            }
-            Err(e) => {
-                // REST fetch failed — proceed with cached data (IOC orders protect us)
-                warn!("   ⚠️  Fresh book fetch failed: {} — using cached data", e);
-                opp
-            }
-        }
+            debug!("   ⚡ WS books stale — TRUSTING CACHED DATA for speed");
+            opp
         }; // close if ws_fresh { ... } else { ... }
 
         // Re-check capital against potentially updated opportunity

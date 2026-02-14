@@ -19,7 +19,7 @@ use crate::metrics;
 use crate::types::{MarketId, Side, OrderType, TimeInForce, TokenIdRegistry, PreparedOrder};
 use crate::websocket::hash_asset_id;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
@@ -1831,10 +1831,10 @@ impl ArbEngine {
 
         let up_token_str = market.up_token_id.clone();
         let down_token_str = market.down_token_id.clone();
-        let up_neg_risk = self.token_registry.is_neg_risk(up_hash);
-        let down_neg_risk = self.token_registry.is_neg_risk(down_hash);
-        let up_fee = self.token_registry.fee_rate_bps(up_hash);
-        let down_fee = self.token_registry.fee_rate_bps(down_hash);
+        let up_neg_risk = market.neg_risk;
+        let down_neg_risk = market.neg_risk;
+        let up_fee = market.up_fee_bps;
+        let down_fee = market.down_fee_bps;
 
         info!("   ⚡ Spawning background exec: {} Up + {} Down orders (${:.2} reserved)",
               up_signals.len(), down_signals.len(), estimated_cost);
@@ -1845,15 +1845,37 @@ impl ArbEngine {
         let event_slug = market.event_slug.clone();
 
         tokio::spawn(async move {
-            let result = sign_and_submit_orders(
+            // Panic-safe wrapper: if anything inside panics, we still send an
+            // error ExecResult so the executing_slug is cleared and capital refunded.
+            let result = std::panic::AssertUnwindSafe(sign_and_submit_orders(
                 executor, up_signals, down_signals,
                 up_token_str, down_token_str,
                 up_neg_risk, down_neg_risk,
                 up_fee, down_fee,
-                market_clone, event_slug, asset_lbl,
+                market_clone.clone(), event_slug.clone(), asset_lbl,
                 estimated_cost,
-            ).await;
-            let _ = exec_tx.send(result).await;
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                error!("   💥 [BG] PANIC in sign_and_submit_orders for {}", event_slug);
+                ExecResult {
+                    event_slug: event_slug.clone(),
+                    market: market_clone,
+                    asset_label: asset_lbl,
+                    estimated_cost,
+                    up_tokens_total: 0.0, down_tokens_total: 0.0,
+                    up_cost_total: 0.0, down_cost_total: 0.0,
+                    up_orders_ok: 0, down_orders_ok: 0,
+                    up_signals_count: 0, down_signals_count: 0,
+                    sign_elapsed_ms: 0.0, submit_elapsed_ms: 0.0,
+                    total_elapsed_ms: 0.0,
+                    error: Some("Task panicked".to_string()),
+                }
+            });
+            if exec_tx.send(result).await.is_err() {
+                warn!("   ❌ [BG] exec_tx channel closed — result lost for {}", event_slug);
+            }
         });
 
         // Returns immediately — event loop is free to process other WS events!

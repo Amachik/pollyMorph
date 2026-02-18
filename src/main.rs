@@ -33,6 +33,7 @@ mod tuner;
 mod backtester;
 mod simulator;
 mod arb;
+mod oracle_scalp;
 
 use crate::config::{Config, RuntimeParams};
 use crate::execution::{OrderExecutor, MakerManager};
@@ -94,6 +95,11 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
+    // Check if running in Oracle Scalp Mode (late-window AMM sweep)
+    let is_oracle_scalp_mode = std::env::var("ORACLE_SCALP_MODE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Check if running in Shadow Mode (no real trades)
     let is_shadow_mode = std::env::var("IS_SHADOW_MODE")
         .map(|v| v == "true" || v == "1")
@@ -101,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
     
     if is_arb_mode {
         info!("🎯 ARB MODE ENABLED - Crypto Up/Down arbitrage strategy");
+    } else if is_oracle_scalp_mode {
+        info!("🔮 ORACLE SCALP MODE ENABLED - Late-window AMM sweep strategy");
     } else if is_shadow_mode {
         info!("🔮 SHADOW MODE ENABLED - No real trades will be executed");
     }
@@ -236,7 +244,71 @@ async fn main() -> anyhow::Result<()> {
         info!("👋 PollyMorph ARB MODE shutdown complete");
         return Ok(());
     }
-    
+
+    // ========================================================================
+    // ORACLE SCALP MODE: Late-window AMM sweep strategy
+    // ========================================================================
+    if is_oracle_scalp_mode {
+        info!("🔮 Starting Oracle Scalp Engine...");
+
+        tokio::spawn(async move {
+            let metrics_server = MetricsServer::new(9090);
+            metrics_server.run().await;
+        });
+
+        let capital = match executor.check_and_set_capital_from_balance().await {
+            Ok(raw) => {
+                let usdc = raw as f64 / 1_000_000.0;
+                info!("💰 USDC.e balance: ${:.2}", usdc);
+                usdc
+            }
+            Err(e) => {
+                let fallback = std::env::var("ORACLE_CAPITAL")
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(100.0);
+                warn!("⚠️  Could not read on-chain balance: {}. Using ORACLE_CAPITAL=${:.2}", e, fallback);
+                fallback
+            }
+        };
+
+        match executor.check_collateral_allowance().await {
+            Ok(allowance_raw) => {
+                let usdc = allowance_raw / 1_000_000;
+                if usdc < 10 {
+                    warn!("🚨 USDC allowance is only ${} — orders will fail!", usdc);
+                }
+            }
+            Err(e) => warn!("⚠️  Could not check allowance: {}", e),
+        }
+
+        if let Err(e) = executor.update_clob_balance_allowance(&[]).await {
+            warn!("⚠️  CLOB balance sync failed: {}", e);
+        }
+
+        let mut oracle_engine = oracle_scalp::OracleEngine::new(
+            config.clone(),
+            executor.clone(),
+            token_registry.clone(),
+            capital,
+        );
+
+        let shutdown_flag = oracle_engine.shutdown_flag();
+
+        tokio::select! {
+            _ = oracle_engine.run() => {
+                info!("Oracle engine exited");
+            }
+            _ = tokio::signal::ctrl_c() => {
+                warn!("Shutdown signal received");
+                shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        info!("👋 PollyMorph ORACLE SCALP MODE shutdown complete");
+        return Ok(());
+    }
+
     // Fetch active markets from Polymarket API and subscribe
     let polymarket_ws = {
         let mut ws = PolymarketWs::new(config.clone(), ws_event_tx.clone());

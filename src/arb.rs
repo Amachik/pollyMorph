@@ -211,27 +211,27 @@ struct CyclePosition {
 
 /// A single price level in the order book.
 #[derive(Debug, Clone, Copy)]
-struct BookLevel {
-    price: f64,
-    size: f64,
+pub struct BookLevel {
+    pub price: f64,
+    pub size: f64,
 }
 
 /// Full order book snapshot for a single token (Up or Down).
 #[derive(Debug, Clone)]
-struct TokenBook {
-    best_bid: f64,
-    best_ask: f64,
+pub struct TokenBook {
+    pub best_bid: f64,
+    pub best_ask: f64,
     /// All ask levels sorted by price ascending (cheapest first)
-    ask_levels: Vec<BookLevel>,
+    pub ask_levels: Vec<BookLevel>,
     /// Total tokens available across all ask levels
-    total_ask_depth: f64,
+    pub total_ask_depth: f64,
     /// When this book was last updated (monotonic clock for freshness checks)
-    updated_at: std::time::Instant,
+    pub updated_at: std::time::Instant,
 }
 
 /// Events sent from the WebSocket book watcher to the arb engine.
 #[derive(Debug)]
-enum ArbWsEvent {
+pub enum ArbWsEvent {
     /// Full order book snapshot for an asset (event_type: "book").
     /// Sent on first subscribe and on every trade that affects the book.
     BookSnapshot {
@@ -325,7 +325,7 @@ struct ArbOpportunity {
 
 /// Commands sent from the arb engine to the WebSocket book watcher.
 #[derive(Debug)]
-enum WsCommand {
+pub enum WsCommand {
     /// Subscribe to new asset IDs.
     Subscribe(Vec<String>),
     /// Unsubscribe from asset IDs (expired markets).
@@ -2634,7 +2634,7 @@ async fn submit_order_side(
 /// - Dynamic unsubscribe: {"assets_ids": [...], "operation": "unsubscribe"}
 /// - Keepalive: send "PING" every 10 seconds
 /// - Events: book, price_change, last_trade_price, market_resolved, new_market
-async fn run_book_watcher(
+pub async fn run_book_watcher(
     event_tx: mpsc::Sender<ArbWsEvent>,
     mut cmd_rx: mpsc::Receiver<WsCommand>,
     shutdown: Arc<AtomicBool>,

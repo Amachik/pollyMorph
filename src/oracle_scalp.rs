@@ -13,6 +13,9 @@ use crate::execution::OrderExecutor;
 use crate::types::{MarketId, Side, OrderType, TimeInForce, TokenIdRegistry, TradeSignal, SignalUrgency, PreparedOrder};
 use crate::websocket::hash_asset_id;
 
+use ethers::types::{Eip1559TransactionRequest, H160, U256};
+use ethers::types::transaction::eip2718::TypedTransaction;
+
 use futures_util::FutureExt;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 
 from .config import CITIES, City
+from .datalog import log_actual
 
 # ─── WU API ──────────────────────────────────────────────────────────────────
 
@@ -24,8 +25,8 @@ from .config import CITIES, City
 WU_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
 WU_API_BASE = "https://api.weather.com/v1/location"
 
-MAX_RETRIES = 2
-RETRY_DELAY = 1.0
+MAX_RETRIES = 3
+RETRY_DELAY = 1.5
 
 
 @dataclass
@@ -84,7 +85,10 @@ async def fetch_wu_daily(
                 headers={"User-Agent": "Mozilla/5.0"},
             ) as resp:
                 if resp.status == 429:
-                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                    wait = RETRY_DELAY * (2 ** attempt)  # exponential backoff
+                    print(f"      ⚠️  WU 429 rate-limit for {city_key} {target_date} "
+                          f"(attempt {attempt+1}/{MAX_RETRIES+1}, waiting {wait:.0f}s)")
+                    await asyncio.sleep(wait)
                     continue
                 if resp.status != 200:
                     return None
@@ -115,7 +119,7 @@ async def fetch_wu_daily(
                 # Partial day (still in progress) has fewer
                 is_complete = len(observations) >= 20
 
-                return WUDailyResult(
+                result = WUDailyResult(
                     station_id=station,
                     city_key=city_key,
                     target_date=target_date,
@@ -126,6 +130,16 @@ async def fetch_wu_daily(
                     unit=city.unit,
                     is_complete=is_complete,
                 )
+
+                # Log actual observation to persistent archive
+                if is_complete:
+                    try:
+                        log_actual(city_key, target_date, result.high_temp,
+                                   result.low_temp, station_id=station)
+                    except Exception:
+                        pass
+
+                return result
 
         except (aiohttp.ClientError, asyncio.TimeoutError):
             if attempt < MAX_RETRIES:

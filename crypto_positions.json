@@ -1,0 +1,72 @@
+{
+  "btc-updown-5m-1771416900": {
+    "event_slug": "btc-updown-5m-1771416900",
+    "question": "Bitcoin Up or Down - February 18, 7:15AM-7:20AM ET",
+    "side": "Down",
+    "token_id": "38560846908256552524017558798279952127126342128797807917805522022580075006773",
+    "entry_price": 0.41,
+    "size_usdc": 5.0,
+    "tokens": 12.2,
+    "order_id": "DRY-1771417156-38560846",
+    "placed_at": "2026-02-18T12:19:16.392682+00:00",
+    "end_time": "2026-02-18T12:20:00+00:00",
+    "status": "won",
+    "pnl": 7.2
+  },
+  "btc-updown-5m-1771417200": {
+    "event_slug": "btc-updown-5m-1771417200",
+    "question": "Bitcoin Up or Down - February 18, 7:20AM-7:25AM ET",
+    "side": "Up",
+    "token_id": "54539716544187396840268943606340812740216081467899536231346357879113456395975",
+    "entry_price": 0.27,
+    "size_usdc": 5.0,
+    "tokens": 18.52,
+    "order_id": "DRY-1771417412-54539716",
+    "placed_at": "2026-02-18T12:23:32.939067+00:00",
+    "end_time": "2026-02-18T12:25:00+00:00",
+    "status": "lost",
+    "pnl": -5.0
+  },
+  "btc-updown-5m-1771417500": {
+    "event_slug": "btc-updown-5m-1771417500",
+    "question": "Bitcoin Up or Down - February 18, 7:25AM-7:30AM ET",
+    "side": "Down",
+    "token_id": "16404651861557014069372494504079192698106389435634706053049679810457912883391",
+    "entry_price": 0.38,
+    "size_usdc": 5.0,
+    "tokens": 13.16,
+    "order_id": "DRY-1771417729-16404651",
+    "placed_at": "2026-02-18T12:28:49.991779+00:00",
+    "end_time": "2026-02-18T12:30:00+00:00",
+    "status": "lost",
+    "pnl": -5.0
+  },
+  "btc-updown-5m-1771420200": {
+    "event_slug": "btc-updown-5m-1771420200",
+    "question": "Bitcoin Up or Down - February 18, 8:10AM-8:15AM ET",
+    "side": "Down",
+    "token_id": "42019946122330571893883083389643747610448208849457888925312587990118915704927",
+    "entry_price": 0.44,
+    "size_usdc": 5.0,
+    "tokens": 11.36,
+    "order_id": "DRY-1771420334-42019946",
+    "placed_at": "2026-02-18T13:12:14.741487+00:00",
+    "end_time": "2026-02-18T13:15:00+00:00",
+    "status": "open",
+    "pnl": 0.0
+  },
+  "btc-updown-5m-1771420500": {
+    "event_slug": "btc-updown-5m-1771420500",
+    "question": "Bitcoin Up or Down - February 18, 8:15AM-8:20AM ET",
+    "side": "Down",
+    "token_id": "95645427646600064631783537129637836586878592825181164418746973777509167728547",
+    "entry_price": 0.39,
+    "size_usdc": 5.0,
+    "tokens": 12.82,
+    "order_id": "DRY-1771420742-95645427",
+    "placed_at": "2026-02-18T13:19:02.302742+00:00",
+    "end_time": "2026-02-18T13:20:00+00:00",
+    "status": "open",
+    "pnl": 0.0
+  }
+}

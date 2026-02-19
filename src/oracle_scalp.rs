@@ -13,8 +13,7 @@ use crate::execution::OrderExecutor;
 use crate::types::{MarketId, Side, OrderType, TimeInForce, TokenIdRegistry, TradeSignal, SignalUrgency, PreparedOrder};
 use crate::websocket::hash_asset_id;
 
-use ethers::types::{Eip1559TransactionRequest, H160, U256};
-use ethers::types::transaction::eip2718::TypedTransaction;
+use ethers::types::U256;
 
 use futures_util::FutureExt;
 use rust_decimal::Decimal;
@@ -1005,33 +1004,15 @@ async fn run_background_redeem(
     event_slug: &str,
     _executor: &Arc<OrderExecutor>,
 ) -> RedeemResult {
+    // Tokens are held by the PROXY wallet (maker=proxy on all orders).
+    // Direct on-chain redeemPositions from the EOA would recover $0.
+    // Must use the Polymarket relayer API which executes on behalf of the proxy.
     use ethers::prelude::*;
 
-    info!("   🔄 [BG] Redeeming {:.0} tokens for {}", tokens, event_slug);
+    info!("   🔄 [BG] Redeeming {:.0} tokens for {} via relayer", tokens, event_slug);
 
-    let rpc_url = &config.polymarket.polygon_rpc;
-    let provider = match Provider::<Http>::try_from(rpc_url.as_str()) {
-        Ok(p) => p,
-        Err(e) => return RedeemResult {
-            event_slug: event_slug.to_string(),
-            usdc_recovered: 0.0, profit: 0.0,
-            error: Some(format!("RPC provider error: {}", e)),
-        },
-    };
-
-    let wallet: LocalWallet = match config.polymarket.private_key.parse::<LocalWallet>() {
-        Ok(w) => w.with_chain_id(137u64),
-        Err(e) => return RedeemResult {
-            event_slug: event_slug.to_string(),
-            usdc_recovered: 0.0, profit: 0.0,
-            error: Some(format!("Wallet parse error: {}", e)),
-        },
-    };
-
-    let client = SignerMiddleware::new(provider, wallet);
-
-    let ctf_addr: Address = "0x4D97DcD97Ec945F40CF65F87097aCe5EA0476045"
-        .parse().expect("CTF address");
+    // --- Build redeemPositions calldata ---
+    // CTF contract: 0x4D97DcD97Ec945F40CF65F87097aCe5EA0476045 (embedded in calldata via ABI encode)
     let usdc_e: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         .parse().expect("USDC address");
 
@@ -1048,7 +1029,6 @@ async fn run_background_redeem(
     let fn_selector = &ethers::core::utils::keccak256(
         b"redeemPositions(address,bytes32,bytes32,uint256[])"
     )[..4];
-
     let encoded_params = ethers::abi::encode(&[
         ethers::abi::Token::Address(usdc_e),
         ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
@@ -1058,90 +1038,226 @@ async fn run_background_redeem(
             ethers::abi::Token::Uint(U256::from(2u64)),
         ]),
     ]);
-
     let mut calldata = fn_selector.to_vec();
     calldata.extend_from_slice(&encoded_params);
+    let calldata_hex = format!("0x{}", hex::encode(&calldata));
 
-    let estimate_tx = TransactionRequest::new()
-        .to(ctf_addr)
-        .data(calldata.clone())
-        .from(client.address());
+    // --- Proxy transaction constants (Polygon mainnet) ---
+    // Source: https://github.com/Polymarket/builder-relayer-client/blob/main/src/config/index.ts
+    let proxy_factory = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
+    let relay_hub     = "0xD216153c06E857cD7f72665E0aF1d7D82172F494";
+    let relayer_url   = "https://relayer-v2.polymarket.com";
 
-    let gas_estimate = match client.estimate_gas(&estimate_tx.into(), None).await {
-        Ok(g) => g,
+    // --- Parse EOA wallet for signing ---
+    let wallet: LocalWallet = match config.polymarket.private_key.parse::<LocalWallet>() {
+        Ok(w) => w.with_chain_id(137u64),
         Err(e) => return RedeemResult {
             event_slug: event_slug.to_string(),
             usdc_recovered: 0.0, profit: 0.0,
-            error: Some(format!("Gas estimation failed: {}", e)),
+            error: Some(format!("Wallet parse error: {}", e)),
         },
     };
-    let gas_limit = gas_estimate * 120 / 100;
+    let eoa = format!("{:?}", wallet.address()); // "0x..." lowercase
 
-    // EIP-1559 gas pricing
-    let priority_fee: U256 = client.provider()
-        .request("eth_maxPriorityFeePerGas", ())
+    // --- Fetch relay payload (nonce + relay address) ---
+    let http_client = reqwest::Client::new();
+    let relay_payload: serde_json::Value = match http_client
+        .get(format!("{}/relay-payload", relayer_url))
+        .query(&[("address", eoa.as_str()), ("type", "proxy")])
+        .send().await
+        .and_then(|r| futures_util::FutureExt::boxed(async move { r.json().await }).into_inner())
         .await
-        .unwrap_or(U256::from(30_000_000_000u64)); // 30 gwei fallback
-    let base_fee = client.provider()
-        .get_block(BlockNumber::Latest)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|b| b.base_fee_per_gas)
-        .unwrap_or(U256::from(50_000_000_000u64)); // 50 gwei fallback
-    let max_fee = base_fee * 2 + priority_fee;
-
-    let typed_tx: TypedTransaction = Eip1559TransactionRequest::new()
-        .to(ctf_addr)
-        .data(calldata)
-        .from(client.address())
-        .gas(gas_limit)
-        .max_fee_per_gas(max_fee)
-        .max_priority_fee_per_gas(priority_fee)
-        .chain_id(137u64)
-        .into();
-
-    let pending_tx = match client.send_transaction(typed_tx, None).await {
-        Ok(tx) => tx,
+    {
+        Ok(v) => v,
         Err(e) => return RedeemResult {
             event_slug: event_slug.to_string(),
             usdc_recovered: 0.0, profit: 0.0,
-            error: Some(format!("Redeem tx send failed: {}", e)),
+            error: Some(format!("relay-payload fetch failed: {}", e)),
         },
     };
 
-    let tx_hash = format!("{:?}", pending_tx.tx_hash());
-    info!("   🔗 Redeem tx sent: {} (waiting for confirmation...)", tx_hash);
+    let nonce = match relay_payload.get("nonce").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return RedeemResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            error: Some(format!("relay-payload missing nonce: {}", relay_payload)),
+        },
+    };
+    let relay_addr = match relay_payload.get("address").and_then(|v| v.as_str()) {
+        Some(a) => a.to_string(),
+        None => return RedeemResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            error: Some(format!("relay-payload missing address: {}", relay_payload)),
+        },
+    };
 
-    match pending_tx.await {
-        Ok(Some(receipt)) => {
-            let status = receipt.status.map(|s| s.as_u64()).unwrap_or(0);
-            if status == 1 {
-                let usdc_recovered = tokens; // 1 token = $1.00 at resolution
-                let profit = usdc_recovered - cost;
-                info!("   ✅ Redeem confirmed: {} | +${:.2} recovered | profit: ${:.2}",
-                      tx_hash, usdc_recovered, profit);
-                RedeemResult {
-                    event_slug: event_slug.to_string(),
-                    usdc_recovered, profit, error: None,
+    // --- Build struct hash ---
+    // keccak256("rlx:" + from + to + data + txFee(0) + gasPrice(0) + gasLimit + nonce + relayHub + relay)
+    // Source: https://github.com/Polymarket/builder-relayer-client/blob/main/src/builder/proxy.ts
+    let gas_limit: u64 = 10_000_000;
+    let tx_fee: u64 = 0;
+    let gas_price: u64 = 0;
+
+    fn pad_addr(addr: &str) -> [u8; 20] {
+        let s = addr.trim_start_matches("0x");
+        let b = hex::decode(s).unwrap_or_default();
+        let mut out = [0u8; 20];
+        let start = 20usize.saturating_sub(b.len());
+        out[start..].copy_from_slice(&b[..b.len().min(20)]);
+        out
+    }
+    fn pad_u256(n: u64) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[24..].copy_from_slice(&n.to_be_bytes());
+        out
+    }
+    fn pad_u256_str(s: &str) -> [u8; 32] {
+        let n: u64 = s.parse().unwrap_or(0);
+        pad_u256(n)
+    }
+
+    let mut preimage: Vec<u8> = Vec::new();
+    preimage.extend_from_slice(b"rlx:");
+    preimage.extend_from_slice(&pad_addr(&eoa));
+    preimage.extend_from_slice(&pad_addr(proxy_factory));
+    preimage.extend_from_slice(&calldata);
+    preimage.extend_from_slice(&pad_u256(tx_fee));
+    preimage.extend_from_slice(&pad_u256(gas_price));
+    preimage.extend_from_slice(&pad_u256(gas_limit));
+    preimage.extend_from_slice(&pad_u256_str(&nonce));
+    preimage.extend_from_slice(&pad_addr(relay_hub));
+    preimage.extend_from_slice(&pad_addr(&relay_addr));
+
+    let struct_hash = ethers::core::utils::keccak256(&preimage);
+
+    // Sign the struct hash directly (not EIP-191 prefixed — proxy.ts uses signMessage on raw hash)
+    let signature = match wallet.sign_hash(ethers::types::H256::from(struct_hash)) {
+        Ok(sig) => format!("0x{}", sig),
+        Err(e) => return RedeemResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            error: Some(format!("Signing failed: {}", e)),
+        },
+    };
+
+    // --- Build and submit the proxy transaction request ---
+    let request_body = serde_json::json!({
+        "type": "PROXY",
+        "from": eoa,
+        "to": proxy_factory,
+        "proxyWallet": config.polymarket.proxy_address,
+        "data": calldata_hex,
+        "nonce": nonce,
+        "signature": signature,
+        "signatureParams": {
+            "gasPrice": gas_price.to_string(),
+            "gasLimit": gas_limit.to_string(),
+            "relayerFee": tx_fee.to_string(),
+            "relayHub": relay_hub,
+            "relay": relay_addr,
+        },
+        "metadata": format!("redeem {}", event_slug),
+    });
+
+    // Auth headers — same HMAC pattern as CLOB API
+    let timestamp = chrono::Utc::now().timestamp_millis().to_string();
+    let body_str = request_body.to_string();
+    let hmac_msg = format!("{}{}{}{}", timestamp, "POST", "/submit", body_str);
+    let hmac_key = base64::decode(&config.polymarket.api_secret).unwrap_or_default();
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&hmac_key)
+        .unwrap_or_else(|_| <Hmac<Sha256> as Mac>::new_from_slice(b"key").unwrap());
+    mac.update(hmac_msg.as_bytes());
+    let sig_bytes = mac.finalize().into_bytes();
+    let builder_sig = base64::encode(sig_bytes);
+
+    let resp = http_client
+        .post(format!("{}/submit", relayer_url))
+        .header("Content-Type", "application/json")
+        .header("POLY_BUILDER_API_KEY", &config.polymarket.api_key)
+        .header("POLY_BUILDER_TIMESTAMP", &timestamp)
+        .header("POLY_BUILDER_PASSPHRASE", &config.polymarket.api_passphrase)
+        .header("POLY_BUILDER_SIGNATURE", &builder_sig)
+        .body(body_str)
+        .send().await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => return RedeemResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            error: Some(format!("Relayer submit failed: {}", e)),
+        },
+    };
+
+    let status = resp.status();
+    let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return RedeemResult {
+            event_slug: event_slug.to_string(),
+            usdc_recovered: 0.0, profit: 0.0,
+            error: Some(format!("Relayer returned {}: {}", status, resp_body)),
+        };
+    }
+
+    let tx_id = resp_body.get("transactionID")
+        .or_else(|| resp_body.get("transactionId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    info!("   🔗 Relayer tx submitted: {} — polling for confirmation...", tx_id);
+
+    // Poll for confirmation (up to 60s)
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let poll: serde_json::Value = match http_client
+            .get(format!("{}/transaction", relayer_url))
+            .query(&[("id", tx_id.as_str())])
+            .send().await
+            .and_then(|r| futures_util::FutureExt::boxed(async move { r.json().await }).into_inner())
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let txns = poll.as_array().cloned().unwrap_or_default();
+        if let Some(txn) = txns.first() {
+            let state = txn.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            let tx_hash = txn.get("transactionHash").and_then(|v| v.as_str()).unwrap_or("");
+            match state {
+                "STATE_CONFIRMED" | "STATE_MINED" => {
+                    let usdc_recovered = tokens;
+                    let profit = usdc_recovered - cost;
+                    info!("   ✅ Redeem confirmed: {} | +${:.2} recovered | profit: ${:.2}",
+                          tx_hash, usdc_recovered, profit);
+                    return RedeemResult {
+                        event_slug: event_slug.to_string(),
+                        usdc_recovered, profit, error: None,
+                    };
                 }
-            } else {
-                RedeemResult {
-                    event_slug: event_slug.to_string(),
-                    usdc_recovered: 0.0, profit: 0.0,
-                    error: Some(format!("Redeem tx reverted: {}", tx_hash)),
+                "STATE_FAILED" | "STATE_INVALID" => {
+                    return RedeemResult {
+                        event_slug: event_slug.to_string(),
+                        usdc_recovered: 0.0, profit: 0.0,
+                        error: Some(format!("Relayer tx failed: state={} hash={}", state, tx_hash)),
+                    };
+                }
+                _ => {
+                    debug!("   ⏳ Relayer tx state: {} ({})", state, tx_id);
                 }
             }
         }
-        Ok(None) => RedeemResult {
-            event_slug: event_slug.to_string(),
-            usdc_recovered: 0.0, profit: 0.0,
-            error: Some("Redeem tx dropped from mempool".to_string()),
-        },
-        Err(e) => RedeemResult {
-            event_slug: event_slug.to_string(),
-            usdc_recovered: 0.0, profit: 0.0,
-            error: Some(format!("Redeem tx wait failed: {}", e)),
-        },
+    }
+
+    RedeemResult {
+        event_slug: event_slug.to_string(),
+        usdc_recovered: 0.0, profit: 0.0,
+        error: Some(format!("Relayer tx timed out after 60s: {}", tx_id)),
     }
 }

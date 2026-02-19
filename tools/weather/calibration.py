@@ -55,6 +55,10 @@ class CityCalibration:
 
 # ─── Fetch Actual Daily Highs ─────────────────────────────────────────────────
 
+# Concurrency limiter — Open-Meteo handles 10+ concurrent requests fine
+_API_SEM = asyncio.Semaphore(12)
+
+
 async def _fetch_actual_highs(
     session: aiohttp.ClientSession,
     city: City,
@@ -71,15 +75,26 @@ async def _fetch_actual_highs(
     result = {}
 
     # ── Try WU first (resolution source, whole-degree integers) ──
-    current = start_date
+    # Parallel fetch with bounded concurrency
+    days = []
+    d = start_date
+    while d <= end_date:
+        days.append(d)
+        d += timedelta(days=1)
+
+    async def _fetch_one_wu(target_d: date):
+        async with _API_SEM:
+            return target_d, await fetch_wu_daily(session, city_key, target_d)
+
+    wu_results = await asyncio.gather(*[_fetch_one_wu(d) for d in days], return_exceptions=True)
     wu_count = 0
-    while current <= end_date:
-        wu = await fetch_wu_daily(session, city_key, current)
+    for wr in wu_results:
+        if isinstance(wr, Exception):
+            continue
+        target_d, wu = wr
         if wu and wu.n_observations > 0 and wu.is_complete:
-            result[current] = float(wu.high_temp)
+            result[target_d] = float(wu.high_temp)
             wu_count += 1
-        current = date.fromordinal(current.toordinal() + 1)
-        await asyncio.sleep(0.15)
 
     # If WU got most days, return (skip Open-Meteo)
     expected_days = (end_date - start_date).days + 1
@@ -212,21 +227,40 @@ async def compute_calibration(
     await asyncio.sleep(0.15)
 
     # For each model, compute bias and RMSE over the calibration period
+    # Parallel fetch: all (model, date) pairs at once with bounded concurrency
     model_cals: Dict[str, ModelCalibration] = {}
+    sorted_dates = sorted(actuals.keys())
+
+    async def _fetch_hindcast_pair(model: str, target_date: date):
+        async with _API_SEM:
+            maxes = await _fetch_ensemble_hindcast(session, city, target_date, model)
+            return model, target_date, maxes
+
+    tasks = [
+        _fetch_hindcast_pair(model, td)
+        for model in ENSEMBLE_MODELS
+        for td in sorted_dates
+    ]
+    hindcast_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Group results by model
+    model_data: Dict[str, List[Tuple[date, List[float]]]] = {m: [] for m in ENSEMBLE_MODELS}
+    for hr in hindcast_results:
+        if isinstance(hr, Exception):
+            continue
+        model, td, maxes = hr
+        if maxes:
+            model_data[model].append((td, maxes))
 
     for model in ENSEMBLE_MODELS:
         biases = []
         sq_errors = []
-
-        for target_date, actual_high in sorted(actuals.items()):
-            maxes = await _fetch_ensemble_hindcast(session, city, target_date, model)
-            await asyncio.sleep(0.15)
-
-            if maxes:
-                ensemble_mean = sum(maxes) / len(maxes)
-                bias = ensemble_mean - actual_high
-                biases.append(bias)
-                sq_errors.append(bias ** 2)
+        for td, maxes in model_data[model]:
+            actual_high = actuals[td]
+            ensemble_mean = sum(maxes) / len(maxes)
+            bias = ensemble_mean - actual_high
+            biases.append(bias)
+            sq_errors.append(bias ** 2)
 
         if biases:
             mean_bias = sum(biases) / len(biases)
@@ -317,6 +351,7 @@ def bayesian_condition_on_current(
     samples: np.ndarray,
     current_high: float,
     hours_remaining: float,
+    forecast_remaining_max: float = None,
 ) -> np.ndarray:
     """
     Bayesian conditioning: for today's markets, condition the forecast
@@ -325,15 +360,15 @@ def bayesian_condition_on_current(
     The daily high MUST be >= current_high. Additionally, with fewer hours
     remaining, the daily high is increasingly unlikely to rise much further.
 
-    Algorithm:
-    1. Remove all samples below current_high (impossible)
-    2. For remaining samples, apply a decay that makes large exceedances
-       less likely when few hours remain (temperature peaks usually mid-afternoon)
+    Enhanced: when forecast_remaining_max is available (from hourly trajectory),
+    use it to set a tighter ceiling on the expected daily high. If the hourly
+    forecast shows declining temps, the high is already locked in.
 
     Args:
         samples: augmented ensemble samples
         current_high: today's observed high so far
         hours_remaining: estimated hours of potential warming remaining
+        forecast_remaining_max: max temp forecast for remaining hours (from hourly data)
 
     Returns:
         conditioned samples (resampled to original length)
@@ -351,12 +386,30 @@ def bayesian_condition_on_current(
         upside = max(1.0, hours_remaining * 0.3)  # Potential additional warming
         return current_high + rng.exponential(scale=upside, size=len(samples))
 
-    # Step 2: Apply time-based decay to exceedance above current high
-    # With 0 hours left, almost no further warming expected
-    # With 6+ hours, significant warming still possible
-    exceedance = valid - current_high
-    decay_scale = max(0.5, hours_remaining * 0.8)  # degrees per hour of potential warming
-    weights = np.exp(-exceedance / max(decay_scale, 0.1))
+    # Step 2: Determine the realistic upside ceiling
+    # If we have the hourly forecast trajectory, use it to cap the expected max
+    if forecast_remaining_max is not None:
+        # The hourly forecast gives us a much better estimate of remaining upside
+        # than the generic hours_remaining * 0.8 heuristic
+        expected_max = max(current_high, forecast_remaining_max)
+        # Allow some uncertainty above the hourly forecast (it's not perfect)
+        uncertainty_margin = max(0.5, hours_remaining * 0.3)
+        ceiling = expected_max + uncertainty_margin
+        # Tighten decay: samples far above the ceiling are very unlikely
+        exceedance = valid - current_high
+        ceiling_exceedance = ceiling - current_high
+        # Use ceiling-aware decay: gentle up to ceiling, steep beyond
+        decay_scale = max(0.5, ceiling_exceedance)
+        weights = np.exp(-exceedance / max(decay_scale, 0.1))
+        # Extra penalty for samples above the ceiling
+        above_ceiling = valid > ceiling
+        weights[above_ceiling] *= np.exp(-(valid[above_ceiling] - ceiling) / max(0.5, uncertainty_margin * 0.5))
+    else:
+        # Fallback: generic time-based decay
+        exceedance = valid - current_high
+        decay_scale = max(0.5, hours_remaining * 0.8)
+        weights = np.exp(-exceedance / max(decay_scale, 0.1))
+
     weights /= weights.sum()
 
     # Step 3: Resample with weights to get correct distribution

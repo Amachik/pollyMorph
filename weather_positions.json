@@ -1,182 +1,332 @@
 {
-  "seattle:2026-02-13:48\u00b0F or higher": {
-    "city_key": "seattle",
-    "target_date": "2026-02-13",
-    "bucket_label": "48\u00b0F or higher",
-    "token_id": "61128604990087042122548586390800420839327799964679640129754629783994076452623",
-    "market_id": "0xc0e068aa0ffc2ce40170b1fb688871242fdc5ff518e83af7ef59db6e496abdbd",
-    "avg_price": 0.4,
-    "size": 19.62081103021041,
-    "tokens": 49.052027575526026,
-    "order_ids": [
-      "DRY-1770841769-61128604"
-    ],
-    "created_at": "2026-02-11T20:29:29.209180+00:00",
-    "status": "open"
-  },
-  "chicago:2026-02-13:50\u00b0F or higher": {
+  "chicago:2026-02-17:54\u00b0F or higher": {
     "city_key": "chicago",
-    "target_date": "2026-02-13",
-    "bucket_label": "50\u00b0F or higher",
-    "token_id": "30331902129654784606752281938362429012785221908588626559084208010677141681598",
-    "market_id": "0x1509e483198a3810002d69b28e3039dfc1ad645313b072c80d7b40666a5fbbfa",
-    "avg_price": 0.33,
-    "size": 10.8036361802929,
-    "tokens": 32.73829145543303,
+    "target_date": "2026-02-17",
+    "bucket_label": "54\u00b0F or higher",
+    "token_id": "4893376521774555202021770432223316748695533491169823846197572820683940566799",
+    "market_id": "0x24f49e94df681d5c8216821e3f6c86097855a5b8df3acbf9c7e90aca7b2f4d96",
+    "avg_price": 0.44,
+    "size": 5.993407218308947,
+    "tokens": 13.621380041611244,
     "order_ids": [
-      "DRY-1770841774-30331902"
+      "0xd1b8fc955b6d436eb1547013f6ee65c3e9c663605d19975138581435ae9d8887"
     ],
-    "created_at": "2026-02-11T20:29:34.211372+00:00",
-    "status": "open"
+    "created_at": "2026-02-15T17:52:11.614574+00:00",
+    "status": "expired"
   },
-  "miami:2026-02-13:82\u00b0F or higher": {
-    "city_key": "miami",
-    "target_date": "2026-02-13",
-    "bucket_label": "82\u00b0F or higher",
-    "token_id": "43994532259367728657842787808900360848708307438105292920186060466241706204054",
-    "market_id": "0xa4a59519a45364c73c9aa9424a18160129520ff0919fcec4a4a8c0886fd2040e",
-    "avg_price": 0.08,
-    "size": 7.064609859953486,
-    "tokens": 88.30762324941857,
-    "order_ids": [
-      "DRY-1770841779-43994532"
-    ],
-    "created_at": "2026-02-11T20:29:39.213502+00:00",
-    "status": "open"
-  },
-  "seattle:2026-02-12:52\u00b0F or higher": {
+  "seattle:2026-02-17:44-45\u00b0F": {
     "city_key": "seattle",
-    "target_date": "2026-02-12",
-    "bucket_label": "52\u00b0F or higher",
-    "token_id": "13229687097575266829023468078805158594553178802359379157884407773584165069245",
-    "market_id": "0x0b56a018a42e290591f7cffe282e214ca140c401e41de67665a8dda11a53d03e",
-    "avg_price": 0.63,
-    "size": 13.770381469484645,
-    "tokens": 21.85774836426134,
+    "target_date": "2026-02-17",
+    "bucket_label": "44-45\u00b0F",
+    "token_id": "54586315645806102755476934723226409518197210446897666540104475877346088500241",
+    "market_id": "0xbd62a74a5b8c8431ef31096ef13439b46f704ef71c21d56fd48e26dda9e83384",
+    "avg_price": 0.24,
+    "size": 2.134417859344155,
+    "tokens": 8.893407747267313,
     "order_ids": [
-      "DRY-1770841784-13229687"
+      "0xceab5bbf6069d5f57ea64722ee3f0b22d363d4846d0e3b6cac31ce3f8f25ed38"
     ],
-    "created_at": "2026-02-11T20:29:44.215448+00:00",
-    "status": "open"
+    "created_at": "2026-02-15T17:52:16.992550+00:00",
+    "status": "expired"
   },
-  "ankara:2026-02-12:9\u00b0C": {
-    "city_key": "ankara",
-    "target_date": "2026-02-12",
-    "bucket_label": "9\u00b0C",
-    "token_id": "88454409415980665590095917074453192685086542296277966193685246707311997184446",
-    "market_id": "0xabd922c626534d5309395968b4cb92cf5f589d82aef947442db53cddb8bacb17",
-    "avg_price": 0.21,
-    "size": 11.799472355010373,
-    "tokens": 56.18796359528749,
-    "order_ids": [
-      "DRY-1770862995-88454409"
-    ],
-    "created_at": "2026-02-12T02:23:15.019613+00:00",
-    "status": "open"
-  },
-  "buenos_aires:2026-02-13:30\u00b0C": {
-    "city_key": "buenos_aires",
-    "target_date": "2026-02-13",
-    "bucket_label": "30\u00b0C",
-    "token_id": "1800582880770594604834560746934954949345824783600118745578789611596889918207",
-    "market_id": "0x8ba03c68f504afb2d471cd6685f28b21701aeccd6f969e4988cf68ea505960f9",
-    "avg_price": 0.15,
-    "size": 8.5423823367809,
-    "tokens": 56.94921557853934,
-    "order_ids": [
-      "DRY-1770863000-18005828"
-    ],
-    "created_at": "2026-02-12T02:23:20.024503+00:00",
-    "status": "open"
-  },
-  "chicago:2026-02-13:48-49\u00b0F": {
-    "city_key": "chicago",
-    "target_date": "2026-02-13",
-    "bucket_label": "48-49\u00b0F",
-    "token_id": "49385177741124098982859247300514956080137096188597298015674338069267722600656",
-    "market_id": "0x5bda27c788e2e54d5f0fa03882b36d750d1199a3621385f3bdbe44c1ec44e76e",
-    "avg_price": 0.29,
-    "size": 7.246188254388886,
-    "tokens": 24.98685604961685,
-    "order_ids": [
-      "DRY-1770863005-49385177"
-    ],
-    "created_at": "2026-02-12T02:23:25.026804+00:00",
-    "status": "open"
-  },
-  "nyc:2026-02-13:34-35\u00b0F": {
+  "nyc:2026-02-17:42-43\u00b0F": {
     "city_key": "nyc",
-    "target_date": "2026-02-13",
-    "bucket_label": "34-35\u00b0F",
-    "token_id": "839514360059368192220561931154581992051264893306015100143365089893756938083",
-    "market_id": "0x8610eb92326abc5b3e0e84213a6338a6b75b131a0a7aa5035f61e13622f6247d",
-    "avg_price": 0.15,
-    "size": 4.849180400897956,
-    "tokens": 32.32786933931971,
+    "target_date": "2026-02-17",
+    "bucket_label": "42-43\u00b0F",
+    "token_id": "7971788371805821259702538583562001311366304539637869598144691669866117027388",
+    "market_id": "0xc12284ad9f05c1f05e0b70b33d1a583dd56f1beac5e555b41b6eb57e802f31b3",
+    "avg_price": 0.41,
+    "size": 11.416674783970187,
+    "tokens": 27.845548253585825,
     "order_ids": [
-      "DRY-1770863010-83951436"
+      "0x831ad19702b3fa3b042fc6b8e44b5e3622c742a711fe5ef212b4d85e48af6eae"
     ],
-    "created_at": "2026-02-12T02:23:30.029276+00:00",
-    "status": "open"
+    "created_at": "2026-02-17T15:00:35.136197+00:00",
+    "status": "expired"
   },
-  "toronto:2026-02-13:-1\u00b0C": {
-    "city_key": "toronto",
-    "target_date": "2026-02-13",
-    "bucket_label": "-1\u00b0C",
-    "token_id": "101026866739966152882692779344311604623722099276615560614964229519623017589962",
-    "market_id": "0x586d57c6123e74b7ec68baaf204e10619c58830942bd3d5b3a984f12511b5666",
-    "avg_price": 0.2,
-    "size": 4.90601515290942,
-    "tokens": 24.5300757645471,
-    "order_ids": [
-      "DRY-1770863015-10102686"
-    ],
-    "created_at": "2026-02-12T02:23:35.033367+00:00",
-    "status": "open"
-  },
-  "seoul:2026-02-12:5\u00b0C": {
-    "city_key": "seoul",
-    "target_date": "2026-02-12",
-    "bucket_label": "5\u00b0C",
-    "token_id": "88563195935688803479929684853990757515191110175521640367711389833988581049301",
-    "market_id": "0xf95b3c6573b095b4b6db25d0a2ee93435e861128843f24d154a743421ab4ccac",
-    "avg_price": 0.12,
-    "size": 4.394358156449662,
-    "tokens": 36.61965130374718,
-    "order_ids": [
-      "DRY-1770863020-88563195"
-    ],
-    "created_at": "2026-02-12T02:23:40.038104+00:00",
-    "status": "open"
-  },
-  "toronto:2026-02-13:-2\u00b0C": {
-    "city_key": "toronto",
-    "target_date": "2026-02-13",
-    "bucket_label": "-2\u00b0C",
-    "token_id": "112776079205845163405506880803493457365821296283932341940756167888924122473841",
-    "market_id": "0x4b8470970cb3a304e54dc46aa54ca82c78835bc8b597702b96d2b532d906602b",
-    "avg_price": 0.1,
-    "size": 4.145909027937186,
-    "tokens": 41.459090279371864,
-    "order_ids": [
-      "DRY-1770863025-11277607"
-    ],
-    "created_at": "2026-02-12T02:23:45.040699+00:00",
-    "status": "open"
-  },
-  "miami:2026-02-13:78-79\u00b0F": {
-    "city_key": "miami",
-    "target_date": "2026-02-13",
-    "bucket_label": "78-79\u00b0F",
-    "token_id": "54663334922946377221956316606308788816965124481647429933673417637739625527147",
-    "market_id": "0x685a2ac363a050f01cbe3f270f5843515bc06c9a1751485322e096dbfd0df7a3",
+  "buenos_aires:2026-02-17:30\u00b0C or below": {
+    "city_key": "buenos_aires",
+    "target_date": "2026-02-17",
+    "bucket_label": "30\u00b0C or below",
+    "token_id": "72701669791414428928991363805905978354536687091952530244096924736326490926864",
+    "market_id": "0x40fd7d3bbda1d883e06fe17da4e77dcfc64539264522ec15f40b14639b36bb76",
     "avg_price": 0.32,
-    "size": 2.5019788289663527,
-    "tokens": 7.818683840519852,
+    "size": 9.196934187033053,
+    "tokens": 28.74041933447829,
     "order_ids": [
-      "DRY-1770863130-54663334"
+      "0x73fd913e3bb7a63b62fd55fc704f6116dcb8e527c3597421f423a96ca3ce4cc8"
     ],
-    "created_at": "2026-02-12T02:25:30.296218+00:00",
+    "created_at": "2026-02-17T15:00:40.971564+00:00",
+    "status": "expired"
+  },
+  "nyc:2026-02-17:41\u00b0F or below": {
+    "city_key": "nyc",
+    "target_date": "2026-02-17",
+    "bucket_label": "41\u00b0F or below",
+    "token_id": "41483137449098218100834743793196300236448249903449679617625928130536895636874",
+    "market_id": "0x0605fa28fa1e2d94d83715056ed0c05bf179c18c8f92ca71c412e422ca713980",
+    "avg_price": 0.29,
+    "size": 8.746502638004284,
+    "tokens": 30.160353924152705,
+    "order_ids": [
+      "0x4a1580a836c6b61a36e6d99157a54a568e27420790e0a34bf8766ce5ba08c037"
+    ],
+    "created_at": "2026-02-17T15:00:47.754930+00:00",
+    "status": "expired"
+  },
+  "miami:2026-02-17:78-79\u00b0F": {
+    "city_key": "miami",
+    "target_date": "2026-02-17",
+    "bucket_label": "78-79\u00b0F",
+    "token_id": "14014594231853993012449200221893329851372074991072155945711046909543258223365",
+    "market_id": "0xb893a5adeecb25236c56cec5759d614d9c8934b83d3f661abb356f703351d532",
+    "avg_price": 0.58,
+    "size": 13.501445054858257,
+    "tokens": 23.278353542859065,
+    "order_ids": [
+      "0x46a62e16c69be4cefcad1b6ed97e4085024583cf66cf83535196fcdbbd5a86b2"
+    ],
+    "created_at": "2026-02-17T15:00:53.152990+00:00",
+    "status": "expired"
+  },
+  "buenos_aires:2026-02-17:31\u00b0C": {
+    "city_key": "buenos_aires",
+    "target_date": "2026-02-17",
+    "bucket_label": "31\u00b0C",
+    "token_id": "97392299472991405570700142260792639634446811071695508001023092833026577445206",
+    "market_id": "0xf5e5fe8cac631459917a12f24b8d5b6c24ff97fb50549104c467270fd55667ef",
+    "avg_price": 0.47,
+    "size": 11.219936086534693,
+    "tokens": 23.872204439435517,
+    "order_ids": [
+      "0x2575f58bb4b9987d5d198e22387cd7be9c1e8786ce4ad47a60cecf5d68c39f15"
+    ],
+    "created_at": "2026-02-17T15:00:58.547126+00:00",
+    "status": "expired"
+  },
+  "atlanta:2026-02-17:64-65\u00b0F": {
+    "city_key": "atlanta",
+    "target_date": "2026-02-17",
+    "bucket_label": "64-65\u00b0F",
+    "token_id": "6122991547869517042914153703366828149354302767981361388876586225266982484703",
+    "market_id": "0xb47c4192264f55ae21d7b8117a01cd58f5980aeecd2998c418a7259bf5bbe6bc",
+    "avg_price": 0.27,
+    "size": 8.053955876499277,
+    "tokens": 29.82946620925658,
+    "order_ids": [
+      "0xbfcb31346811a05e20b21082dcff61453ed23cbd8c98729ab776ab9a2211dc0e"
+    ],
+    "created_at": "2026-02-17T15:01:03.999992+00:00",
+    "status": "expired"
+  },
+  "chicago:2026-02-19:54\u00b0F or higher": {
+    "city_key": "chicago",
+    "target_date": "2026-02-19",
+    "bucket_label": "54\u00b0F or higher",
+    "token_id": "70743812752788569799840277970079466714306149500389003458456963415791476041078",
+    "market_id": "0xf56ff481d6eb43313b7ce830530a344cac00808e0822d5685565d7b886ddc787",
+    "avg_price": 0.65,
+    "size": 13.539387858650164,
+    "tokens": 20.829827474846404,
+    "order_ids": [
+      "0xe447b36d3d9d5b619371198054ea5fcaba8ea3046d5d1642244bb0384d7ccdf7"
+    ],
+    "created_at": "2026-02-17T15:01:09.441096+00:00",
+    "status": "open"
+  },
+  "atlanta:2026-02-17:66-67\u00b0F": {
+    "city_key": "atlanta",
+    "target_date": "2026-02-17",
+    "bucket_label": "66-67\u00b0F",
+    "token_id": "22120586948167520280607703099612207901077183284105002798296460719743054718714",
+    "market_id": "0xbf2c3cd3a3d3a14ffa15677da8d7841b614116587c8fec9dcc136f9c5a981011",
+    "avg_price": 0.26,
+    "size": 6.205615890530965,
+    "tokens": 23.867753425119098,
+    "order_ids": [
+      "0x041ee6385f697e2e6f9da374d1dbd13fadb098549e875e00ce81ec7786159575"
+    ],
+    "created_at": "2026-02-17T15:01:14.857395+00:00",
+    "status": "expired"
+  },
+  "toronto:2026-02-18:2\u00b0C": {
+    "city_key": "toronto",
+    "target_date": "2026-02-18",
+    "bucket_label": "2\u00b0C",
+    "token_id": "113636443956285211951084194613516210505777993511990993459566802564709397324444",
+    "market_id": "0x94d5c0bd4f9c05b8873d9247373daad99e3e34ca38156b2ff961a2ae890caf26",
+    "avg_price": 0.32,
+    "size": 6.652991327999022,
+    "tokens": 20.790597899996943,
+    "order_ids": [
+      "0x76ae0c131e0d6f8df36a9ad291d40e74d48af5ea526d9f5dab43a69ed7f16201"
+    ],
+    "created_at": "2026-02-17T15:01:20.309537+00:00",
+    "status": "open"
+  },
+  "chicago:2026-02-18:60-61\u00b0F": {
+    "city_key": "chicago",
+    "target_date": "2026-02-18",
+    "bucket_label": "60-61\u00b0F",
+    "token_id": "109768820565502638365377578172315294475891767420888795017904618221732145328612",
+    "market_id": "0x772c8a91410b86bd683551d6ab5cef0266a1f525ba4a22f9748bde2df0e63cb4",
+    "avg_price": 0.31,
+    "size": 6.164201634276185,
+    "tokens": 19.884521400890918,
+    "order_ids": [
+      "0x39c63b09b45c3ecb6ab80e249f019391c0faad2447f0f1c1e9628bf5f977d6c0"
+    ],
+    "created_at": "2026-02-17T15:01:25.755193+00:00",
+    "status": "open"
+  },
+  "nyc:2026-02-18:40-41\u00b0F": {
+    "city_key": "nyc",
+    "target_date": "2026-02-18",
+    "bucket_label": "40-41\u00b0F",
+    "token_id": "91371196924889115162572890558238206953148446600614602111036402597392160898453",
+    "market_id": "0x6fea9a71e7bcbc3468848d1cc81ef029ba6e11d242181d3e7a211359ac41a6a4",
+    "avg_price": 0.38,
+    "size": 6.604819348070306,
+    "tokens": 17.381103547553437,
+    "order_ids": [
+      "0x0710f4d6bb66444be698ada758742fc68f2ddf8c8d9fb78681242094e2f2b7fc"
+    ],
+    "created_at": "2026-02-18T11:07:01.000936+00:00",
+    "status": "open"
+  },
+  "atlanta:2026-02-19:78\u00b0F or higher": {
+    "city_key": "atlanta",
+    "target_date": "2026-02-19",
+    "bucket_label": "78\u00b0F or higher",
+    "token_id": "92076948332839447161549855827031979124473081112343163126333365720134733628403",
+    "market_id": "0x086c696f901cb2744fb8cc664dff20a6dc888f4aaa3e6baee0de223c9f21ec04",
+    "avg_price": 0.42,
+    "size": 6.508072983425764,
+    "tokens": 15.49541186529944,
+    "order_ids": [
+      "0xedfac3f1f99875a386a7ab2297ab871b81decd6c4dc7ebe75010d14e3360e1f9"
+    ],
+    "created_at": "2026-02-18T11:07:06.308649+00:00",
+    "status": "open"
+  },
+  "london:2026-02-18:5\u00b0C": {
+    "city_key": "london",
+    "target_date": "2026-02-18",
+    "bucket_label": "5\u00b0C",
+    "token_id": "2093126120937502851918427510334329919411150922385268245798628625511545917662",
+    "market_id": "0xe835c2a222ec760a4088c97a0f64137a9dfa0b94df824c6faa871962be82df8f",
+    "avg_price": 0.24,
+    "size": 4.9740585103734904,
+    "tokens": 20.725243793222877,
+    "order_ids": [
+      "0xc42246d51a177175c3a5dfa79dd2607685dd0aad1e3ad8d20d9cb4a461e52a32"
+    ],
+    "created_at": "2026-02-18T11:07:11.620276+00:00",
+    "status": "open"
+  },
+  "wellington:2026-02-19:22\u00b0C": {
+    "city_key": "wellington",
+    "target_date": "2026-02-19",
+    "bucket_label": "22\u00b0C",
+    "token_id": "93281174037434609678325685667866875826720130857723387975151361264127138750463",
+    "market_id": "0x25673254dc9236569657f9ae1be1b3b5657dd3ecc5fc34a9addc618eebaef468",
+    "avg_price": 0.26,
+    "size": 3.9160158451582974,
+    "tokens": 15.06159940445499,
+    "order_ids": [
+      "0xe98d81cd44d9c025b516f55decd40608a68fefd488c77febc588e3b9b9235918"
+    ],
+    "created_at": "2026-02-18T11:07:16.924558+00:00",
+    "status": "open"
+  },
+  "seoul:2026-02-19:4\u00b0C": {
+    "city_key": "seoul",
+    "target_date": "2026-02-19",
+    "bucket_label": "4\u00b0C",
+    "token_id": "11762552412567098422479299763423413177907861703112012415136961399254355490866",
+    "market_id": "0x12cb643aebdb1d307dc29fa12ba33367c0387531f89dd7907df2c9e3c82157b0",
+    "avg_price": 0.38,
+    "size": 4.650716753878183,
+    "tokens": 12.23872829967943,
+    "order_ids": [
+      "0x53247d949474595e25a5bb7f61fd27a19ec1f295554245772a0f2c039da3dfec"
+    ],
+    "created_at": "2026-02-18T11:07:22.241122+00:00",
+    "status": "open"
+  },
+  "nyc:2026-02-19:38-39\u00b0F": {
+    "city_key": "nyc",
+    "target_date": "2026-02-19",
+    "bucket_label": "38-39\u00b0F",
+    "token_id": "65121362080452615351355280789818308947760803784856423564873900847635242401898",
+    "market_id": "0xfa56748c82ffe0a1e17546dec339615da3be6a0c7e5a7bdf9ba0dd25902f16e5",
+    "avg_price": 0.23,
+    "size": 3.707180075863656,
+    "tokens": 16.11817424288546,
+    "order_ids": [
+      "0xda06835b00a130aa54b0cc1de4fa56a71607031a1e7f0bc0aa92c99e0fa8e7c5"
+    ],
+    "created_at": "2026-02-18T11:07:27.579792+00:00",
+    "status": "open"
+  },
+  "seattle:2026-02-18:40-41\u00b0F": {
+    "city_key": "seattle",
+    "target_date": "2026-02-18",
+    "bucket_label": "40-41\u00b0F",
+    "token_id": "111376959332916216991486674956757669518049932411059187671311057076612085306477",
+    "market_id": "0x7c6ad34f5f320ed9d60d5ec995e0e7b4add964bf5f7d1ab16d8c91d5b0cfeb06",
+    "avg_price": 0.22,
+    "size": 3.4446339862433866,
+    "tokens": 15.657427210197211,
+    "order_ids": [
+      "0xaf9dfbc0980536ff955197161b023e2f2c36bdf9b2c4df0876ab5a5e52fe237f"
+    ],
+    "created_at": "2026-02-18T11:07:32.889198+00:00",
+    "status": "open"
+  },
+  "chicago:2026-02-18:62-63\u00b0F": {
+    "city_key": "chicago",
+    "target_date": "2026-02-18",
+    "bucket_label": "62-63\u00b0F",
+    "token_id": "78385196762663521033882471977514944350553281913952611138790545369329630221549",
+    "market_id": "0x70b4a4b5802596a9acac232484a917f82d50e5708307506be7a96ad8c97e5cb5",
+    "avg_price": 0.34,
+    "size": 3.6361175400932146,
+    "tokens": 10.694463353215337,
+    "order_ids": [
+      "0xb33a24601164cd9cdddf272f2d50895f8e7ed1c5d258981e7890acba614fdf2f"
+    ],
+    "created_at": "2026-02-18T11:07:38.136266+00:00",
+    "status": "open"
+  },
+  "miami:2026-02-18:80-81\u00b0F": {
+    "city_key": "miami",
+    "target_date": "2026-02-18",
+    "bucket_label": "80-81\u00b0F",
+    "token_id": "98975325965859941346962539083635370548175770030145824327125907648542159211275",
+    "market_id": "0xf938d6cf4551614e62a7ed7f518956bdb96ac9fcf5df351d95d78bb11623c697",
+    "avg_price": 0.44,
+    "size": 4.121338065012379,
+    "tokens": 9.36667742048268,
+    "order_ids": [
+      "0x43ca6f8e534ac2e16af436195d1775c5bf87fda33e010fdbcb8f800e389d1c4e"
+    ],
+    "created_at": "2026-02-18T11:07:43.425322+00:00",
+    "status": "open"
+  },
+  "seattle:2026-02-19:40-41\u00b0F": {
+    "city_key": "seattle",
+    "target_date": "2026-02-19",
+    "bucket_label": "40-41\u00b0F",
+    "token_id": "7442748432062809242864794690713751506545557159410564382738557491815812836127",
+    "market_id": "0xc3f624dcfcbbc281ef53e85c7d60e2e1fc8672a6288c2e87d67f6138ad44bbd8",
+    "avg_price": 0.34,
+    "size": 2.9985180036290253,
+    "tokens": 8.819170598908897,
+    "order_ids": [
+      "0x1ac63f095ae06f52bbc721f274733028f789443b44ab930aac6868abb59a575e"
+    ],
+    "created_at": "2026-02-18T11:07:48.796856+00:00",
     "status": "open"
   }
 }

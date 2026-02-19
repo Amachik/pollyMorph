@@ -34,37 +34,55 @@ from .config import (
     City, CITIES, OPEN_METEO_ENSEMBLE_URL, ENSEMBLE_MODELS,
 )
 from .wunderground import fetch_wu_daily
+from .datalog import load_logged_ensembles, load_logged_deterministic, load_logged_actual
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-MOS_HISTORY_DAYS = 15          # Days of history (historical-forecast API supports ~15)
+MOS_HISTORY_DAYS = 30          # Days of history (more data = more stable error profiles)
 MOS_CACHE_FILE = Path(__file__).parent.parent.parent / "weather_mos.json"
 MOS_FRESHNESS_HOURS = 18       # Rebuild MOS after this many hours
 MOS_MIN_DAYS = 3               # Minimum usable days for valid MOS
 
 # Historical forecast API — archives past model runs, returns per-model daily max
 HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
-# Models available on historical-forecast API (subset of ensemble models)
+# Models available on historical-forecast API
+# 8 independent model families — doubled from original 4
 HISTORICAL_MODELS = [
-    "ecmwf_ifs025", "gfs_seamless", "icon_seamless", "gem_global",
+    "ecmwf_ifs025",           # ECMWF IFS 0.25° — world's best global model
+    "gfs_seamless",           # NOAA GFS — strong for North America
+    "icon_seamless",          # DWD ICON — good for Europe
+    "gem_global",             # Environment Canada GEM
+    "jma_seamless",           # Japan Meteorological Agency GSM
+    "meteofrance_seamless",   # Météo-France ARPEGE/AROME
+    "ukmo_seamless",          # UK Met Office — excellent global model
+    "knmi_seamless",          # KNMI Harmonie — independent European model
 ]
 
 MAX_RETRIES = 2
 RETRY_DELAY = 1.0
 
+# Concurrency limiter — avoid hammering APIs
+# Open-Meteo doesn't rate-limit aggressively; WU is the bottleneck
+_MOS_SEM = asyncio.Semaphore(12)
+
 # ─── Sample Generation Tuning ────────────────────────────────────────────────
 
 # Fraction of final samples from MOS error resampling vs bias-corrected ensemble
-MOS_ERROR_FRAC = 0.45          # 45% from historical error resampling
-RAW_ENSEMBLE_FRAC = 0.30       # 30% from bias-corrected raw ensemble members
+MOS_ERROR_FRAC = 0.50          # 50% from historical error resampling (up from 45%)
+RAW_ENSEMBLE_FRAC = 0.25       # 25% from bias-corrected raw ensemble members
 WU_FORECAST_FRAC = 0.25        # 25% from WU's own forecast (when available)
 
+# Recency weighting: exponential decay halflife for MOS error resampling
+# Recent errors are more relevant (current weather regime persistence)
+RECENCY_HALFLIFE_DAYS = 5.0    # Half-weight after 5 days
+
 # WU forecast std by lead days (in °C; scaled ×1.8 for °F cities)
-WU_LEAD_STD = {0: 0.6, 1: 1.0, 2: 1.5, 3: 2.0}
-WU_LEAD_STD_DEFAULT = 2.5
+# Tightened — WU forecasts their own station; their error is small short-range.
+WU_LEAD_STD = {0: 0.4, 1: 0.7, 2: 1.2, 3: 1.8}
+WU_LEAD_STD_DEFAULT = 2.2
 
 # Total target samples for probability estimation
-N_TARGET_SAMPLES = 600
+N_TARGET_SAMPLES = 1000
 
 
 # ─── Data Structures ─────────────────────────────────────────────────────────
@@ -244,30 +262,96 @@ async def build_station_mos(
     end_date = today - timedelta(days=1)
     start_date = end_date - timedelta(days=n_days - 1)
 
-    # ── Step 1: Fetch WU actuals ──
+    # ── Step 1: Fetch WU actuals (parallel with bounded concurrency) ──
+    import time as _time
+    _t0 = _time.time()
+    print(f"      [{city_key}] Step 1: Fetching {n_days} days of WU actuals...")
     wu_actuals: Dict[date, int] = {}
+    days_list = []
     d = start_date
     while d <= end_date:
-        try:
-            wu = await fetch_wu_daily(session, city_key, d)
-            if wu and wu.is_complete:
-                wu_actuals[d] = wu.high_temp
-        except Exception:
-            pass
+        days_list.append(d)
         d += timedelta(days=1)
-        await asyncio.sleep(0.12)
+
+    _wu_ok = 0
+    _wu_fail = 0
+
+    async def _fetch_wu_one(target_d: date):
+        nonlocal _wu_ok, _wu_fail
+        async with _MOS_SEM:
+            try:
+                wu = await fetch_wu_daily(session, city_key, target_d)
+                if wu and wu.is_complete:
+                    _wu_ok += 1
+                    return target_d, wu.high_temp
+                else:
+                    _wu_fail += 1
+            except Exception:
+                _wu_fail += 1
+            return target_d, None
+
+    wu_results = await asyncio.gather(*[_fetch_wu_one(d) for d in days_list])
+    for target_d, high in wu_results:
+        if high is not None:
+            wu_actuals[target_d] = high
+
+    print(f"      [{city_key}] Step 1 done: {len(wu_actuals)}/{n_days} WU days "
+          f"({_wu_fail} failed) in {_time.time()-_t0:.1f}s")
 
     if len(wu_actuals) < MOS_MIN_DAYS:
+        print(f"      [{city_key}] ✗ Insufficient WU data ({len(wu_actuals)} < {MOS_MIN_DAYS})")
         return None
 
     # ── Step 2: Bulk-fetch model hindcasts via historical forecast API ──
-    # Single API call returns ~15 days of per-model daily max forecasts
+    _t1 = _time.time()
+    print(f"      [{city_key}] Step 2: Fetching historical model hindcasts...")
     try:
         model_hindcasts = await _fetch_historical_model_maxes(
             session, city, start_date, end_date,
         )
     except Exception:
         model_hindcasts = {}
+    print(f"      [{city_key}] Step 2 done: {len(model_hindcasts)} models in {_time.time()-_t1:.1f}s")
+
+    # ── Step 2b: Supplement with logged data for dates the API missed ──
+    # The historical forecast API only covers ~15 days. Our data archive has:
+    #   - WU actuals (ground truth) — always safe to use
+    #   - Deterministic model values (JMA, MeteoFrance, etc.) — safe for MOS errors
+    #   - Ensemble member data — NOT safe for MOS error profiles!
+    #
+    # WHY ensemble means can't be used for MOS errors:
+    # MOS errors are computed as (deterministic_max - wu_actual). At forecast time,
+    # generate_mos_samples subtracts det_ens_offset to convert det→ensemble space.
+    # If we inject ensemble means here, the error is already in ensemble space,
+    # causing a DOUBLE offset correction (+3-4°F for GFS at US stations).
+    # Only deterministic values are compatible with the MOS error/offset framework.
+    _logged_det = 0
+    _logged_actuals = 0
+
+    for d in days_list:
+        # First: try to fill in missing WU actuals from our logged archive
+        if d not in wu_actuals:
+            logged_actual = load_logged_actual(city_key, d)
+            if logged_actual is not None:
+                wu_actuals[d] = logged_actual
+                _logged_actuals += 1
+
+        if d not in wu_actuals:
+            continue  # Still no ground truth for this day, skip
+
+        # Load deterministic model values (safe for MOS — these ARE deterministic)
+        logged_det = load_logged_deterministic(city_key, d)
+        for model_name, det_val in logged_det.items():
+            if model_name not in model_hindcasts:
+                model_hindcasts[model_name] = {}
+            if d not in model_hindcasts[model_name]:
+                model_hindcasts[model_name][d] = det_val
+                _logged_det += 1
+
+    if _logged_actuals:
+        print(f"      [{city_key}] Step 2b: +{_logged_actuals} WU actuals from archive")
+    if _logged_det:
+        print(f"      [{city_key}] Step 2b: +{_logged_det} deterministic data points from archive")
 
     # ── Step 3: Compute per-model errors against WU actuals ──
     profiles: Dict[str, ModelErrorProfile] = {}
@@ -295,28 +379,50 @@ async def build_station_mos(
     if not profiles:
         return None
 
-    # ── Step 4: Compute deterministic-to-ensemble offset ──
+    _t2 = _time.time()
+    # ── Step 4: Compute deterministic-to-ensemble offset (parallel) ──
     # The historical forecast API returns deterministic model output, but at
     # forecast time we use ensemble means. These can differ significantly
     # (e.g. GFS deterministic is ~3°F warmer than GFS ensemble mean).
     # We measure the offset on recent days where ensemble data is available.
+    # Only for models that HAVE ensemble APIs — skip deterministic-only models.
+    from .config import ENSEMBLE_MODELS
+    ensemble_set = set(ENSEMBLE_MODELS)
+    recent_days = sorted(wu_actuals.keys())[-5:]  # Last 5 days only
+
+    # Build all (model, date) pairs that need ensemble fetches
+    offset_tasks = []
     for model in list(profiles.keys()):
+        if model not in ensemble_set:
+            continue
         hindcast_data = model_hindcasts.get(model, {})
-        offsets: List[float] = []
-        for d in sorted(wu_actuals.keys())[-5:]:  # Last 5 days only (ensemble available)
-            if d not in hindcast_data:
-                continue
-            det_val = hindcast_data[d]
+        for d in recent_days:
+            if d in hindcast_data:
+                offset_tasks.append((model, d, hindcast_data[d]))
+
+    async def _fetch_offset(model: str, target_d: date, det_val: float):
+        async with _MOS_SEM:
             try:
-                ens_maxes = await _fetch_ensemble_maxes(session, city, d, model)
+                ens_maxes = await _fetch_ensemble_maxes(session, city, target_d, model)
             except Exception:
                 ens_maxes = []
             if ens_maxes:
-                ens_mean = float(np.mean(ens_maxes))
-                offsets.append(det_val - ens_mean)
-            await asyncio.sleep(0.08)
-        if offsets:
-            profiles[model].det_ens_offset = float(np.mean(offsets))
+                return model, det_val - float(np.mean(ens_maxes))
+            return model, None
+
+    offset_results = await asyncio.gather(
+        *[_fetch_offset(m, d, dv) for m, d, dv in offset_tasks]
+    )
+
+    # Group offsets by model
+    model_offsets: Dict[str, List[float]] = {}
+    for model, offset_val in offset_results:
+        if offset_val is not None:
+            model_offsets.setdefault(model, []).append(offset_val)
+    for model, offs in model_offsets.items():
+        if model in profiles:
+            profiles[model].det_ens_offset = float(np.mean(offs))
+    print(f"      [{city_key}] Step 4 done: {len(offset_tasks)} offset fetches in {_time.time()-_t2:.1f}s")
 
     # ── Step 5: Compute skill weights (inverse std_error²) ──
     # After MOS corrects the bias, only ERROR VARIABILITY matters for weighting.
@@ -359,11 +465,29 @@ def generate_mos_samples(
     all_samples: List[float] = []
 
     # Determine WU allocation (more weight for shorter lead times)
+    # WU IS the resolution source — their forecast deserves heavy weight.
+    # Dynamic boost: when WU disagrees with model consensus, trust WU more
+    # (correlated model bias is the #1 failure mode; WU is independent).
     has_wu = wu_forecast_temp is not None
     wu_frac = 0.0
     if has_wu:
-        wu_frac_by_lead = {0: 0.30, 1: 0.25, 2: 0.18, 3: 0.10}
-        wu_frac = wu_frac_by_lead.get(lead_days, 0.06)
+        wu_frac_by_lead = {0: 0.35, 1: 0.30, 2: 0.22, 3: 0.12}
+        wu_frac = wu_frac_by_lead.get(lead_days, 0.07)
+
+        # Dynamic WU boost: measure disagreement between WU and model consensus
+        model_means = []
+        for model, raw_members in ensemble_by_model.items():
+            if raw_members:
+                model_means.append(float(np.mean(raw_members)))
+        if model_means:
+            consensus = float(np.mean(model_means))
+            city = CITIES.get(mos.city_key)
+            scale = 1.8 if (city and city.unit == "F") else 1.0
+            disagreement = abs(wu_forecast_temp - consensus) / scale  # in °C
+            # If WU disagrees by >1.5°C, boost WU weight by up to 50%
+            if disagreement > 1.5:
+                boost = min(0.50, (disagreement - 1.5) * 0.25)
+                wu_frac = min(0.55, wu_frac * (1.0 + boost))
 
     remaining = 1.0 - wu_frac
     mos_frac = remaining * (MOS_ERROR_FRAC / (MOS_ERROR_FRAC + RAW_ENSEMBLE_FRAC))
@@ -373,7 +497,7 @@ def generate_mos_samples(
     n_raw_total = int(n_target * raw_frac)
     n_wu = int(n_target * wu_frac)
 
-    # ── 1. MOS error resampling (per-model, skill-weighted) ──
+    # ── 1. MOS error resampling (per-model, skill-weighted, recency-weighted) ──
     for model, raw_members in ensemble_by_model.items():
         profile = mos.profiles.get(model)
         if not profile or not profile.errors:
@@ -388,7 +512,14 @@ def generate_mos_samples(
         offset = profile.det_ens_offset
         adjusted_errors = [e - offset for e in profile.errors]
 
-        error_indices = rng.choice(len(adjusted_errors), size=n_mos, replace=True)
+        # Recency weighting: errors are chronological (oldest first).
+        # Give exponentially more weight to recent errors (current weather regime).
+        n_errors = len(adjusted_errors)
+        decay = np.log(2) / RECENCY_HALFLIFE_DAYS
+        weights = np.array([np.exp(-decay * (n_errors - 1 - i)) for i in range(n_errors)])
+        weights /= weights.sum()
+
+        error_indices = rng.choice(n_errors, size=n_mos, replace=True, p=weights)
         mos_samples = [model_mean - adjusted_errors[i] for i in error_indices]
         all_samples.extend(mos_samples)
 
@@ -535,18 +666,31 @@ def is_mos_fresh(mos: StationMOS) -> bool:
         return False
 
 
+_mos_memory_cache: Dict[str, StationMOS] = {}
+
+
 async def get_or_build_mos(
     session: aiohttp.ClientSession,
     city_key: str,
 ) -> Optional[StationMOS]:
-    """Get MOS — from cache if fresh, else rebuild for this station."""
+    """Get MOS — from memory cache, disk cache, or rebuild."""
+    global _mos_memory_cache
+
+    # 1. In-memory cache (avoids re-reading JSON 84 times in backtest)
+    if city_key in _mos_memory_cache and is_mos_fresh(_mos_memory_cache[city_key]):
+        return _mos_memory_cache[city_key]
+
+    # 2. Disk cache
     cached = load_mos_cache()
+    _mos_memory_cache.update(cached)  # Populate memory cache
     if city_key in cached and is_mos_fresh(cached[city_key]):
         return cached[city_key]
 
+    # 3. Rebuild
     mos = await build_station_mos(session, city_key)
     if mos:
         cached[city_key] = mos
+        _mos_memory_cache[city_key] = mos
         save_mos_cache(cached)
     return mos
 
@@ -554,29 +698,47 @@ async def get_or_build_mos(
 async def build_all_mos(
     session: aiohttp.ClientSession,
 ) -> Dict[str, StationMOS]:
-    """Build MOS for all stations. ~2-4 min on first run; cached afterwards."""
+    """Build MOS for all stations. Parallel build with bounded concurrency."""
     cached = load_mos_cache()
     result: Dict[str, StationMOS] = {}
 
+    # Separate cached vs stale
+    to_build = []
     for city_key in CITIES:
         if city_key in cached and is_mos_fresh(cached[city_key]):
             result[city_key] = cached[city_key]
             print(f"   ✓ {city_key}: cached ({cached[city_key].n_days}d, {cached[city_key].n_models}m)")
-            continue
-
-        print(f"   ⏳ Building MOS for {CITIES[city_key].name}...")
-        mos = await build_station_mos(session, city_key)
-        if mos:
-            result[city_key] = mos
-            bias_strs = [
-                "%s:%+.1f" % (p.model.split("_")[0], p.mean_bias)
-                for p in mos.profiles.values()
-            ]
-            print(f"   ✓ {city_key}: {mos.n_days} days, {mos.n_models} models, "
-                  f"biases=[{', '.join(bias_strs)}]")
         else:
-            print(f"   ✗ {city_key}: insufficient data")
-        await asyncio.sleep(0.2)
+            to_build.append(city_key)
+
+    if to_build:
+        print(f"   ⏳ Building MOS for {len(to_build)} stations in parallel...")
+
+        # Build up to 4 stations concurrently (each station already uses _MOS_SEM internally)
+        station_sem = asyncio.Semaphore(4)
+
+        async def _build_one(ck: str):
+            async with station_sem:
+                return ck, await build_station_mos(session, ck)
+
+        mos_results = await asyncio.gather(
+            *[_build_one(ck) for ck in to_build], return_exceptions=True
+        )
+
+        for item in mos_results:
+            if isinstance(item, Exception):
+                continue
+            city_key, mos = item
+            if mos:
+                result[city_key] = mos
+                bias_strs = [
+                    "%s:%+.1f" % (p.model.split("_")[0], p.mean_bias)
+                    for p in mos.profiles.values()
+                ]
+                print(f"   ✓ {city_key}: {mos.n_days} days, {mos.n_models} models, "
+                      f"biases=[{', '.join(bias_strs)}]")
+            else:
+                print(f"   ✗ {city_key}: insufficient data")
 
     save_mos_cache(result)
     return result

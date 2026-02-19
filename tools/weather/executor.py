@@ -26,6 +26,7 @@ from py_clob_client.clob_types import (
     ApiCreds,
     OrderArgs,
     OrderType,
+    AssetType,
     BalanceAllowanceParams,
 )
 
@@ -43,10 +44,10 @@ CHAIN_ID = 137  # Polygon mainnet
 
 # Order placement settings
 ORDER_TYPE = OrderType.GTC        # Good-Till-Cancelled
-PRICE_OFFSET = 0.01               # Place limit 1¢ above market (ensure fill)
 MIN_ORDER_SIZE = 1.0              # Minimum order size in USDC
 MAX_ORDER_SIZE = MAX_BET_USDC     # Maximum order size from config
 FEE_RATE_BPS = 200                # Conservative taker fee estimate (2%)
+MAX_PRICE_CAP = 0.65              # Never pay more than 65¢ (preserves edge on tail bets)
 
 # Position tracking
 POSITIONS_FILE = Path(__file__).parent.parent.parent / "weather_positions.json"
@@ -122,11 +123,16 @@ def create_clob_client() -> Optional[ClobClient]:
         api_passphrase=api_passphrase,
     )
 
+    # Polymarket proxy wallet address (Magic.link account)
+    funder = os.getenv("POLYMARKET_PROXY_ADDRESS")
+
     return ClobClient(
         host=CLOB_HOST,
         chain_id=CHAIN_ID,
         key=private_key,
         creds=creds,
+        signature_type=1 if funder else None,  # POLY_PROXY=1
+        funder=funder,
     )
 
 
@@ -198,6 +204,18 @@ def position_key(city_key: str, target_date: str, bucket_label: str) -> str:
 
 # ─── Order Execution ─────────────────────────────────────────────────────────
 
+def get_best_ask(client: ClobClient, token_id: str) -> Optional[float]:
+    """Query the order book and return the best (lowest) ask price."""
+    try:
+        book = client.get_order_book(token_id)
+        if book and book.asks:
+            # asks are sorted by price ascending; first = best ask
+            return float(book.asks[0].price)
+    except Exception as e:
+        print(f"    ⚠️  Could not fetch order book: {e}")
+    return None
+
+
 def place_order(
     client: ClobClient,
     outcome: WeatherOutcome,
@@ -207,22 +225,54 @@ def place_order(
     dry_run: bool = True,
 ) -> Optional[OrderRecord]:
     """
-    Place a limit buy order for a weather outcome.
+    Place a buy order for a weather outcome.
 
-    Strategy: Place at market_prob + PRICE_OFFSET to ensure fill.
-    For weather markets, we always BUY "Yes" on our predicted bucket.
+    Strategy: Query the real order book, place at or above the best ask
+    to guarantee immediate fill. Cap price to preserve edge.
     """
     token_id = outcome.token_id
     market_price = outcome.market_prob
 
-    # Calculate order parameters
-    # Price: slightly above market to ensure fill (crossing the spread)
-    order_price = min(0.99, round(market_price + PRICE_OFFSET, 2))
+    # Query real order book for best ask (only in live mode)
+    best_ask = None
+    if client and not dry_run:
+        best_ask = get_best_ask(client, token_id)
+        if best_ask:
+            print(f"    📊 Order book: best ask = ${best_ask:.2f} (market midpoint = ${market_price:.2f})")
+
+    # Determine order price:
+    # 1. If we have the real ask, place 1¢ above it to guarantee fill
+    # 2. Cap at forecast_prob * 0.85 (keep at least 15% of our edge)
+    # 3. Never exceed MAX_PRICE_CAP
+    max_willing = min(round(forecast_prob * 0.85, 2), MAX_PRICE_CAP)
+    max_willing = max(max_willing, round(market_price + 0.01, 2))  # at least 1¢ above market
+
+    if best_ask:
+        # Place 1¢ above best ask to cross the spread
+        cross_price = round(best_ask + 0.01, 2)
+        order_price = min(cross_price, max_willing)
+        # If best ask is already above our max willing price, place at max willing
+        # (this becomes a resting limit order that may fill if price drops)
+        if best_ask > max_willing:
+            order_price = max_willing
+            print(f"    ⚠️  Best ask ${best_ask:.2f} > max willing ${max_willing:.2f}, placing limit")
+    else:
+        # Fallback: aggressive offset above market midpoint
+        if market_price < 0.10:
+            offset = 0.06  # 6¢ for very cheap markets (wide spreads)
+        elif market_price < 0.20:
+            offset = 0.05  # 5¢ for cheap markets
+        elif market_price < 0.40:
+            offset = 0.04  # 4¢ for mid-range
+        else:
+            offset = 0.03  # 3¢ for normal markets
+        order_price = min(round(market_price + offset, 2), max_willing)
+
+    order_price = min(order_price, 0.99)
+    order_price = max(order_price, 0.01)
 
     # Size: number of tokens = USDC / price
-    # Each "Yes" token pays $1 if it wins, costs $price
     tokens = bet_size / order_price
-
     if tokens < 1.0:
         return None
 
@@ -249,11 +299,15 @@ def place_order(
     if dry_run:
         record.order_id = f"DRY-{int(time.time())}-{token_id[:8]}"
         record.status = "dry_run"
-        print(f"    🏷️  [DRY RUN] BUY {tokens:.1f} tokens @ ${order_price:.2f} "
+        ask_str = f" (ask=${best_ask:.2f})" if best_ask else ""
+        print(f"    🏷️  [DRY RUN] BUY {tokens:.1f} tokens @ ${order_price:.2f}{ask_str} "
               f"(${bet_size:.1f} USDC)")
         return record
 
-    # LIVE ORDER
+    # LIVE ORDER — try GTC limit order (works with neg-risk matching engine)
+    # Note: create_market_order only SIGNS locally — post_order actually submits.
+    # For weather markets (neg-risk), GTC limits work best: the matching engine
+    # converts YES buys into NO sells on complementary outcomes automatically.
     try:
         order_args = OrderArgs(
             token_id=token_id,
@@ -263,7 +317,8 @@ def place_order(
             fee_rate_bps=FEE_RATE_BPS,
         )
 
-        response = client.create_and_post_order(order_args, options=None)
+        signed = client.create_order(order_args)
+        response = client.post_order(signed, orderType=OrderType.GTC)
 
         if response and isinstance(response, dict):
             record.order_id = response.get("orderID", response.get("id", "unknown"))
@@ -272,8 +327,8 @@ def place_order(
             print(f"       BUY {tokens:.1f} tokens @ ${order_price:.2f} (${bet_size:.1f} USDC)")
         else:
             record.order_id = str(response) if response else "error"
-            record.status = "placed"
-            print(f"    ✅ Order response: {response}")
+            record.status = "failed"
+            print(f"    ⚠️  Unexpected response: {response}")
 
         return record
 
@@ -282,6 +337,28 @@ def place_order(
         record.order_id = f"FAILED-{int(time.time())}"
         print(f"    ❌ Order FAILED: {e}")
         return record
+
+
+# ─── Order Cleanup ────────────────────────────────────────────────────────────
+
+def cancel_stale_orders(client: ClobClient):
+    """Cancel open GTC orders for resolved/expired markets only.
+
+    With FOK market orders, most orders fill instantly or not at all.
+    This only matters for GTC fallback orders that may be resting.
+    We cancel ALL open orders since weather markets resolve daily —
+    any order from a previous scan is likely for a stale price.
+    """
+    try:
+        resp = client.cancel_all()
+        cancelled = resp.get("canceled", []) if isinstance(resp, dict) else resp
+        if cancelled:
+            n = len(cancelled) if isinstance(cancelled, list) else cancelled
+            print(f"  🧹 Cancelled {n} stale GTC orders")
+        else:
+            print(f"  🧹 No stale orders to cancel")
+    except Exception as e:
+        print(f"  ⚠️  Could not cancel stale orders: {e}")
 
 
 # ─── Main Executor ────────────────────────────────────────────────────────────
@@ -314,13 +391,19 @@ async def execute_weather_bets(
             print("❌ Cannot create CLOB client. Check .env credentials.")
             return
 
-        # Check balance
+        # Set allowance and check balance
         try:
-            bal = client.get_balance_allowance()
+            collateral_params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            client.update_balance_allowance(collateral_params)
+            bal = client.get_balance_allowance(collateral_params)
             if bal:
-                print(f"  💰 CLOB Balance: {bal}")
+                print(f"  💰 CLOB Balance/Allowance: {bal}")
         except Exception as e:
-            print(f"  ⚠️  Could not check balance: {e}")
+            print(f"  ⚠️  Could not set allowance / check balance: {e}")
+
+        # Cancel any stale unfilled orders from previous scans
+        # This frees up locked capital so we can place fresh orders
+        cancel_stale_orders(client)
 
     # Ensure MOS is fresh
     mos_cache = load_mos_cache()
@@ -372,9 +455,28 @@ async def execute_weather_bets(
         print("\n📊 No actionable opportunities found this scan.")
         return
 
-    # Filter: skip outcomes where we already have a position
+    # Filter: skip outcomes where we already have a position or high is locked
     new_opportunities = []
+    today_date = datetime.now().date()
+
     for market, outcome, fp, edge, bet, ev in opportunities:
+        # Timezone-aware same-day filter: skip if local time past 5pm (high likely locked)
+        if str(market.target_date) == today_date.isoformat():
+            city = CITIES.get(market.city_key)
+            if city:
+                try:
+                    import zoneinfo
+                    local_tz = zoneinfo.ZoneInfo(city.tz)
+                    local_now = datetime.now(local_tz)
+                    if local_now.hour >= 17:  # 5pm+ local → high is locked
+                        if verbose:
+                            print(f"\n⏭️  Skipping {city.name} {market.target_date} — {local_now.strftime('%H:%M')} local (high locked)")
+                        continue
+                except Exception:
+                    pass  # If timezone fails, allow the bet
+        elif str(market.target_date) < today_date.isoformat():
+            continue  # Skip past dates entirely
+
         key = position_key(market.city_key, str(market.target_date), outcome.bucket.label)
         if key in positions and positions[key].status == "open":
             city = CITIES.get(market.city_key)
@@ -420,7 +522,7 @@ async def execute_weather_bets(
             record.target_date = str(market.target_date)
             log_order(record)
 
-            if record.status in ("placed", "dry_run"):
+            if record.status == "placed":
                 # Track position
                 key = position_key(market.city_key, str(market.target_date), outcome.bucket.label)
                 if key in positions:

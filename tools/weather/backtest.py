@@ -13,10 +13,13 @@ Usage:
 import asyncio
 import argparse
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
+
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
 import aiohttp
 import numpy as np
@@ -25,6 +28,7 @@ from .config import (
     CITIES, City, GAMMA_API_BASE, MONTH_NAMES,
     MIN_EDGE, MAX_EDGE, MIN_FORECAST_PROB, TOP_N_BUCKETS,
     SPREAD_EDGE_BOOST, KELLY_FRACTION, MAX_BET_USDC,
+    MAX_BETS_PER_MARKET, MARKET_DISAGREE_CAP,
 )
 from .markets import (
     WeatherMarket, WeatherOutcome, TempBucket,
@@ -33,6 +37,7 @@ from .markets import (
 from .forecast import get_forecast, calculate_bucket_probabilities
 from .calibration import get_or_compute_calibration, CityCalibration
 from .wunderground import fetch_wu_daily
+from .datalog import log_market, log_forecast
 
 
 # ─── Data Structures ─────────────────────────────────────────────────────────
@@ -166,6 +171,16 @@ async def fetch_all_resolved(
         for result, (ck, dt) in zip(results, task_meta):
             if isinstance(result, ResolvedMarket):
                 resolved.append(result)
+                # Log resolved market data to persistent archive
+                try:
+                    log_market(
+                        result.city_key, result.target_date,
+                        [{"label": lbl, "market_prob": prob}
+                         for lbl, prob in result.market_probs.items()],
+                        resolved=True, winning_label=result.winning_label,
+                    )
+                except Exception:
+                    pass
 
         await asyncio.sleep(0.3)
 
@@ -201,17 +216,30 @@ async def backtest(days_back: int = 7, verbose: bool = False):
             print("   No resolved markets found. Exiting.")
             return
 
-        # 2. Verify winners with WU actuals
+        # 2. Verify winners with WU actuals (parallel)
         print(f"\n🌡️  Verifying with Weather Underground (resolution source)...")
         wu_matches = 0
         wu_mismatches = 0
         wu_unavailable = 0
 
-        for rm in resolved:
-            wu = await fetch_wu_daily(session, rm.city_key, rm.target_date)
+        _bt_sem = asyncio.Semaphore(8)
+
+        async def _verify_wu(rm_idx: int):
+            async with _bt_sem:
+                rm = resolved[rm_idx]
+                return rm_idx, await fetch_wu_daily(session, rm.city_key, rm.target_date)
+
+        wu_verify_results = await asyncio.gather(
+            *[_verify_wu(i) for i in range(len(resolved))], return_exceptions=True
+        )
+        for vr in wu_verify_results:
+            if isinstance(vr, Exception):
+                wu_unavailable += 1
+                continue
+            rm_idx, wu = vr
+            rm = resolved[rm_idx]
             if wu and wu.is_complete:
                 rm.wu_actual = wu.high_temp
-                # Check if WU actual matches the winning bucket
                 city = CITIES[rm.city_key]
                 for b in rm.buckets:
                     low = b.low if b.low != float('-inf') else -9999
@@ -228,56 +256,115 @@ async def backtest(days_back: int = 7, verbose: bool = False):
                         break
             else:
                 wu_unavailable += 1
-            await asyncio.sleep(0.15)
 
         print(f"   WU verification: {wu_matches} match, {wu_mismatches} mismatch, "
               f"{wu_unavailable} unavailable")
 
-        # 3. Compute calibrations
-        print(f"\n📐 Computing calibrations...")
-        city_keys = list(set(rm.city_key for rm in resolved))
+        # 3. Load calibrations from cache (skip expensive recompute — MOS is primary path)
+        print(f"\n📐 Loading calibrations...")
+        from .calibration import load_calibration
+        cached_cals = load_calibration()
         calibrations: Dict[str, CityCalibration] = {}
-        for ck in sorted(city_keys):
-            cal = await get_or_compute_calibration(session, ck)
-            if cal:
-                calibrations[ck] = cal
+        city_keys = sorted(set(rm.city_key for rm in resolved))
+        for ck in city_keys:
+            if ck in cached_cals:
+                calibrations[ck] = cached_cals[ck]
+        if calibrations:
+            print(f"   Loaded {len(calibrations)} cached calibrations")
+        else:
+            # Only recompute if no cache exists at all
+            print(f"   No cache — computing calibrations in parallel...")
+            async def _get_cal(ck):
+                cal = await get_or_compute_calibration(session, ck)
+                return ck, cal
+            cal_results = await asyncio.gather(
+                *[_get_cal(ck) for ck in city_keys], return_exceptions=True
+            )
+            for cr in cal_results:
+                if isinstance(cr, Exception):
+                    continue
+                ck, cal = cr
+                if cal:
+                    calibrations[ck] = cal
 
-        # 4. Generate forecasts for each resolved market
+        # 4. Generate forecasts for each resolved market (parallel, bounded)
         print(f"\n🔮 Generating retroactive forecasts for {len(resolved)} markets...")
-        forecast_count = 0
-        for i, rm in enumerate(resolved):
+
+        # Quick API health check — abort early if daily limit is hit
+        import time as _time
+        _api_ok = True
+        try:
+            _test_params = {
+                "latitude": 40.71, "longitude": -74.01,
+                "hourly": "temperature_2m",
+                "start_date": resolved[0].target_date.isoformat(),
+                "end_date": resolved[0].target_date.isoformat(),
+                "models": "ecmwf_ifs025",
+                "temperature_unit": "fahrenheit",
+            }
+            from .config import OPEN_METEO_ENSEMBLE_URL
+            async with session.get(OPEN_METEO_ENSEMBLE_URL, params=_test_params,
+                                   timeout=aiohttp.ClientTimeout(total=10)) as _r:
+                _d = await _r.json()
+                if _d.get("error"):
+                    print(f"   ⛔ Open-Meteo API unavailable: {_d.get('reason', 'daily limit')}")
+                    print(f"   Skipping forecast generation — backtest will show market-only stats.")
+                    _api_ok = False
+        except Exception:
+            pass  # Network error — try anyway
+
+        _fc_sem = asyncio.Semaphore(10)
+        _fc_done = 0
+        _t0 = _time.time()
+
+        async def _gen_forecast(rm_idx: int):
+            nonlocal _fc_done
+            rm = resolved[rm_idx]
             cal = calibrations.get(rm.city_key)
-            try:
-                # Simulate betting 1 day before resolution (matches pre-resolution prices)
-                ref_date = rm.target_date - timedelta(days=1)
-                forecast = await get_forecast(
-                    session, rm.city_key, rm.target_date,
-                    calibration=cal,
-                    reference_date=ref_date,
-                )
-                if forecast and forecast.n_members > 0:
-                    bucket_probs = calculate_bucket_probabilities(forecast, rm.buckets)
-                    rm.forecast_probs = bucket_probs
-                    rm.forecast_mean = forecast.mean
-                    rm.forecast_std = forecast.std
-                    forecast_count += 1
-            except Exception as e:
-                if verbose:
-                    print(f"   ❌ {rm.city_name} {rm.target_date}: {e}")
+            async with _fc_sem:
+                try:
+                    ref_date = rm.target_date - timedelta(days=1)
+                    forecast = await get_forecast(
+                        session, rm.city_key, rm.target_date,
+                        calibration=cal,
+                        reference_date=ref_date,
+                    )
+                    if forecast and forecast.n_members > 0:
+                        bucket_probs = calculate_bucket_probabilities(forecast, rm.buckets)
+                        rm.forecast_probs = bucket_probs
+                        rm.forecast_mean = forecast.mean
+                        rm.forecast_std = forecast.std
+                except Exception as e:
+                    if verbose:
+                        print(f"   ❌ {rm.city_name} {rm.target_date}: {e}")
 
             # Compute Brier scores
             if rm.forecast_probs:
                 rm.forecast_brier = brier_score(rm.forecast_probs, rm.winning_label)
             rm.market_brier = brier_score(rm.market_probs, rm.winning_label)
 
-            if (i + 1) % 10 == 0:
-                print(f"   ... {i+1}/{len(resolved)} markets processed")
-            await asyncio.sleep(0.15)
+            _fc_done += 1
+            if _fc_done % 10 == 0:
+                elapsed = _time.time() - _t0
+                print(f"   ... {_fc_done}/{len(resolved)} markets ({elapsed:.0f}s)")
 
-        print(f"   Generated forecasts for {forecast_count}/{len(resolved)} markets")
+        if _api_ok:
+            await asyncio.gather(
+                *[_gen_forecast(i) for i in range(len(resolved))],
+                return_exceptions=True,
+            )
+        forecast_count = sum(1 for rm in resolved if rm.forecast_probs)
+        elapsed = _time.time() - _t0
+        print(f"   Generated forecasts for {forecast_count}/{len(resolved)} markets ({elapsed:.0f}s)")
 
         # 5. Print detailed results
         scored = [rm for rm in resolved if rm.forecast_probs]
+
+        if not scored:
+            print(f"\n  ⚠️  No forecasts generated — cannot compute accuracy or P&L.")
+            print(f"      (Open-Meteo API may be rate-limited. Try again later.)")
+            print(f"\n{'=' * 95}")
+            return
 
         if verbose:
             for rm in sorted(scored, key=lambda r: (r.target_date, r.city_name)):
@@ -362,6 +449,7 @@ async def backtest(days_back: int = 7, verbose: bool = False):
                 if spread < 0.05:
                     eff_min_edge = MIN_EDGE + SPREAD_EDGE_BOOST
 
+            market_bets = []  # Track bets for this market (for MAX_BETS_PER_MARKET)
             for bucket_label, fp in rm.forecast_probs.items():
                 if bucket_label not in top_n:
                     continue
@@ -369,12 +457,20 @@ async def backtest(days_back: int = 7, verbose: bool = False):
                     continue
                 mp = rm.market_probs.get(bucket_label, 0.0)
                 edge = fp - mp
+                # Market disagree cap: skip when market prices very low
+                if mp < MARKET_DISAGREE_CAP:
+                    continue
                 if edge > eff_min_edge and edge < MAX_EDGE and mp > 0.01:
                     b = (1.0 / mp) - 1.0
                     kelly_f = ((b * fp) - (1.0 - fp)) / b if b > 0 else 0.0
                     bet = min(max(kelly_f * KELLY_FRACTION * bankroll, 0.0), MAX_BET_USDC)
                     if bet < 1.0:
                         continue
+                    market_bets.append((bucket_label, fp, mp, edge, bet))
+
+            # Limit bets per market
+            market_bets.sort(key=lambda x: x[3], reverse=True)  # Sort by edge
+            for bucket_label, fp, mp, edge, bet in market_bets[:MAX_BETS_PER_MARKET]:
                     total_invested += bet
                     won = bucket_label == rm.winning_label
                     if won:

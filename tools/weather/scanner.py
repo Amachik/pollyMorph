@@ -22,6 +22,7 @@ import aiohttp
 from .config import (
     CITIES, MIN_EDGE, MAX_EDGE, KELLY_FRACTION, MAX_BET_USDC, MIN_LIQUIDITY,
     TOP_N_BUCKETS, MIN_FORECAST_PROB, SAME_DAY_MIN_HOURS, SPREAD_EDGE_BOOST,
+    MAX_BETS_PER_MARKET, MARKET_DISAGREE_CAP,
 )
 from .markets import WeatherMarket, WeatherOutcome, discover_weather_markets, market_summary
 from .forecast import (
@@ -29,6 +30,7 @@ from .forecast import (
     get_current_weather, sanity_check_probabilities, CurrentWeather,
 )
 from .calibration import get_or_compute_calibration, CityCalibration
+from .datalog import log_market, log_forecast
 
 import pytz
 
@@ -139,9 +141,13 @@ def display_results(
         is_top_pick = label in top_n_labels
         meets_confidence = forecast_prob >= MIN_FORECAST_PROB
 
+        # Market disagree cap: skip when market prices very low
+        # (when market says <5%, it's usually right even if we disagree)
+        market_too_cheap = market_prob < MARKET_DISAGREE_CAP
+
         if (edge > effective_min_edge and edge < MAX_EDGE
                 and market_prob > 0.01 and is_top_pick and meets_confidence
-                and not observe_only):
+                and not observe_only and not market_too_cheap):
             bet = calculate_kelly_bet(edge, market_prob, bankroll)
             ev = expected_value(forecast_prob, market_prob, bet)
             if bet >= 1.0:
@@ -184,6 +190,16 @@ def display_results(
     if best_outcome:
         print(f"  ⭐ BEST: BUY \"{best_outcome.bucket.label}\" @ ${best_outcome.market_prob:.2f}"
               f" — edge {best_edge:+.1%}, Kelly bet ${best_bet:.1f}")
+
+    # Limit bets per market to reduce correlated losses
+    if len(opportunities) > MAX_BETS_PER_MARKET:
+        # Keep the ones with highest edge
+        opportunities.sort(key=lambda x: x[2], reverse=True)  # x[2] = edge
+        dropped = opportunities[MAX_BETS_PER_MARKET:]
+        opportunities = opportunities[:MAX_BETS_PER_MARKET]
+        if verbose:
+            for d in dropped:
+                print(f"  ⏭️  Skipped \"{d[0].bucket.label}\" (max {MAX_BETS_PER_MARKET} bets/market)")
 
     if not opportunities:
         print(f"  No actionable edges (threshold: {MIN_EDGE:.0%})")
@@ -310,16 +326,28 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                         hours_remaining_val = 4.0
                     await asyncio.sleep(0.1)
 
-                    # Skip same-day markets past the cutoff — market already has real-time info
-                    if hours_remaining_val < SAME_DAY_MIN_HOURS:
+                    # Enhanced same-day detection using hourly trajectory
+                    # If the hourly forecast shows no future hour exceeding the current high,
+                    # the daily high is already locked in — observe only.
+                    high_already_in = False
+                    if current.forecast_remaining_max is not None:
+                        remaining_upside = current.forecast_remaining_max - current_high_val
+                        if remaining_upside <= 0.5:  # Less than 0.5° upside expected
+                            high_already_in = True
+
+                    # Skip same-day markets past the cutoff OR when high is already in
+                    if hours_remaining_val < SAME_DAY_MIN_HOURS or high_already_in:
                         skip_same_day = True
+                        if high_already_in:
+                            reason = (f"⏰ OBSERVE ONLY: high likely locked at {current_high_val:.0f}° "
+                                      f"(forecast remaining max: {current.forecast_remaining_max:.0f}°, "
+                                      f"{hours_remaining_val:.1f}h left)")
+                        else:
+                            reason = (f"⏰ OBSERVE ONLY: {hours_remaining_val:.1f}h until peak "
+                                      f"— market has real-time advantage")
                         if verbose:
-                            print(f"\n   ⏭️  Skipping {city.name} {market.target_date} "
-                                  f"— same-day, only {hours_remaining_val:.1f}h remaining (cutoff: {SAME_DAY_MIN_HOURS}h)")
-                        # Still show the market but mark bets as observation-only
-                        sanity_warnings.append(
-                            f"⏰ OBSERVE ONLY: {hours_remaining_val:.1f}h until peak — market has real-time advantage"
-                        )
+                            print(f"\n   ⏭️  {city.name} {market.target_date} — {reason}")
+                        sanity_warnings.append(reason)
 
             # Fetch forecast with calibration and conditioning
             cal = calibrations.get(market.city_key)
@@ -327,11 +355,18 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                   f"{' [calibrated]' if cal else ''}"
                   f"{f' [conditioned: high={current_high_val:.0f}°, {hours_remaining_val:.1f}h left]' if current_high_val is not None else ''}")
 
+            # Pass hourly trajectory data for smarter Bayesian conditioning
+            forecast_remaining_max_val = None
+            if market.target_date == today and current_high_val is not None:
+                if current and current.forecast_remaining_max is not None:
+                    forecast_remaining_max_val = current.forecast_remaining_max
+
             forecast = await get_forecast(
                 session, market.city_key, market.target_date,
                 calibration=cal,
                 current_high=current_high_val,
                 hours_remaining=hours_remaining_val,
+                forecast_remaining_max=forecast_remaining_max_val,
             )
 
             if not forecast:
@@ -351,6 +386,22 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                     )
                     # Merge: keep skip_same_day warning on top, add current temp info
                     sanity_warnings = sanity_warnings + extra_warnings
+
+            # Log market data and our forecast to persistent archive
+            try:
+                log_market(
+                    market.city_key, market.target_date,
+                    [{"label": o.bucket.label, "market_prob": o.market_prob,
+                      "token_id": o.token_id} for o in market.outcomes],
+                    liquidity=market.liquidity, slug=market.slug,
+                )
+                log_forecast(
+                    market.city_key, market.target_date, bucket_probs,
+                    forecast.mean, forecast.std, forecast.n_members,
+                    mos_used=forecast.mos_used, sources=forecast.sources,
+                )
+            except Exception:
+                pass  # Never let logging break scanning
 
             # Display results (suppress BUY signals for observation-only markets)
             opportunities = display_results(

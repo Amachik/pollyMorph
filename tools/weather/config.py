@@ -12,7 +12,7 @@ from typing import Optional
 MIN_EDGE = 0.08  # 8%
 
 # Maximum edge — if edge exceeds this, something may be wrong (stale market, bad data)
-MAX_EDGE = 0.60  # 60%
+MAX_EDGE = 0.45  # 45% (was 60%; huge edges are usually model errors)
 
 # Kelly criterion fraction (fractional Kelly for safety)
 KELLY_FRACTION = 0.25  # Use 25% of full Kelly
@@ -32,8 +32,16 @@ NOISE_REPLICATIONS = 20
 TOP_N_BUCKETS = 3
 
 # Minimum forecast probability on a bucket before we'll bet on it
-# Prevents betting on long-shots we rate at only 10%
-MIN_FORECAST_PROB = 0.15  # 15%
+# Backtest: bets where our prob < 25% were 0W/17L = pure loss
+MIN_FORECAST_PROB = 0.25  # 25% (was 15%)
+
+# Maximum bets per city+date to limit correlated losses
+# (Toronto, Buenos Aires often had 2-3 losing bets on same market)
+MAX_BETS_PER_MARKET = 2
+
+# Market disagree cap: skip when market price is extremely low
+# Optimized via backtest: 3% keeps big wins (39x Buenos Aires) while filtering garbage
+MARKET_DISAGREE_CAP = 0.03  # Skip if market < 3% regardless of our forecast
 
 # For same-day markets: minimum hours until typical peak (5PM local) to trade
 # Below this, the market already has too much real-time info; skip same-day

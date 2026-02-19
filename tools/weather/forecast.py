@@ -10,15 +10,18 @@ we get a robust probability distribution for any temperature bucket.
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone, timedelta
 from math import erf, sqrt
+
+logger = logging.getLogger(__name__)
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import numpy as np
 
-from scipy.stats import t as student_t
+from scipy.stats import t as student_t, gaussian_kde
 
 from .config import (
     City, CITIES, OPEN_METEO_ENSEMBLE_URL, OPEN_METEO_FORECAST_URL,
@@ -30,12 +33,23 @@ from .calibration import (
 )
 from .wunderground import fetch_wu_forecast, WUForecast
 from .mos import get_or_build_mos, generate_mos_samples, StationMOS
+from .datalog import (
+    log_ensemble_batch, log_deterministic, log_current_weather, log_forecast,
+)
 
 # Models for deterministic multi-model fallback (when ensemble fails)
 DETERMINISTIC_MODELS = [
     "ecmwf_ifs025", "gfs_seamless", "icon_seamless",
     "gem_seamless", "jma_seamless", "meteofrance_seamless",
 ]
+
+# Extra deterministic models that have MOS profiles but no ensemble API
+# We fetch their single deterministic forecast and create synthetic spread
+MOS_ONLY_MODELS = [
+    "jma_seamless", "meteofrance_seamless", "ukmo_seamless", "knmi_seamless",
+]
+MOS_ONLY_SYNTHETIC_MEMBERS = 10  # Synthetic members per deterministic model
+MOS_ONLY_SYNTHETIC_STD_C = 1.2   # Synthetic spread in °C (scaled for °F)
 
 # Max retries per API call
 MAX_RETRIES = 2
@@ -109,7 +123,8 @@ class CurrentWeather:
     temperature: float               # Current temperature in city's native unit
     apparent_temp: float             # Feels-like temperature
     daily_high_so_far: float         # Highest temp recorded today so far
-    timestamp: datetime
+    forecast_remaining_max: Optional[float] = None  # Max temp forecast for remaining hours
+    timestamp: datetime = None
     source: str = "Open-Meteo"
 
 
@@ -123,6 +138,7 @@ async def get_forecast(
     current_high: Optional[float] = None,
     hours_remaining: Optional[float] = None,
     reference_date: Optional[date] = None,
+    forecast_remaining_max: Optional[float] = None,
 ) -> Optional[ForecastResult]:
     """
     Fetch ensemble weather forecasts from multiple sources and combine them
@@ -148,31 +164,70 @@ async def get_forecast(
     today = reference_date or datetime.now(timezone.utc).date()
     lead_days = max(0, (target_date - today).days)
 
-    # Step 1: Fetch WU's own forecast — THE resolution source
-    wu_fc: Optional[WUForecast] = None
-    try:
-        wu_fc = await fetch_wu_forecast(session, city_key, target_date)
-    except Exception:
-        pass
+    # Steps 1-3: Fetch WU forecast, ensemble models, MOS-only models ALL in parallel
+    # This replaces 5+ sequential API calls with 3 concurrent ones
 
-    # Step 2: Fetch ensemble forecasts per-model (sequentially to avoid rate limits)
-    samples_by_model: Dict[str, List[float]] = {}
-    for model in ENSEMBLE_MODELS:
-        result = await _fetch_open_meteo_ensemble(session, city, target_date, model)
-        if isinstance(result, tuple) and result[0] is not None:
-            model_name, samples = result
-            samples_by_model[model_name] = samples
-        await asyncio.sleep(0.15)
+    async def _fetch_wu():
+        try:
+            return await fetch_wu_forecast(session, city_key, target_date)
+        except Exception:
+            return None
 
-    # Step 3: Try MOS-based forecasting (station-specific error correction)
-    # MOS replaces: calibration, WU injection, NWS, disagreement detection, spread scaling
-    # It handles all of those internally via empirical error distributions
-    mos: Optional[StationMOS] = None
+    async def _fetch_ensembles():
+        # Try batch first (1 API call for all models); fall back to parallel individual
+        batch = await _fetch_open_meteo_ensemble_batch(
+            session, city, target_date, ENSEMBLE_MODELS,
+        )
+        if batch:
+            return batch
+        # Fallback: parallel individual model fetches
+        async def _one(m):
+            return await _fetch_open_meteo_ensemble(session, city, target_date, m)
+        results = await asyncio.gather(*[_one(m) for m in ENSEMBLE_MODELS])
+        out = {}
+        for name, members in results:
+            if name and members:
+                out[name] = members
+        return out
+
+    async def _fetch_mos_det():
+        try:
+            return await _fetch_mos_only_deterministic(session, city, target_date)
+        except Exception:
+            return {}
+
+    async def _fetch_mos_data():
+        try:
+            return await get_or_build_mos(session, city_key)
+        except Exception:
+            return None
+
+    wu_fc, ensemble_result, mos_only, mos = await asyncio.gather(
+        _fetch_wu(), _fetch_ensembles(), _fetch_mos_det(), _fetch_mos_data(),
+    )
+
+    # Log fetched data to disk for long-term accumulation
+    # Only log during live runs (not backtests) to avoid polluting archive
+    # with retroactive data that wasn't actually fetched on that date
+    if reference_date is None:
+        try:
+            if ensemble_result:
+                log_ensemble_batch(city_key, target_date, ensemble_result)
+            if mos_only:
+                for mn, (det_val, members) in mos_only.items():
+                    log_deterministic(city_key, target_date, mn,
+                                      det_val, members or None)
+        except Exception:
+            pass  # Never let logging break forecasting
+
+    # Merge ensemble + MOS-only deterministic results
+    samples_by_model: Dict[str, List[float]] = dict(ensemble_result)
+    if mos_only:
+        for model_name, (det_val, members) in mos_only.items():
+            if model_name not in samples_by_model and members:
+                samples_by_model[model_name] = members
+
     use_mos = False
-    try:
-        mos = await get_or_build_mos(session, city_key)
-    except Exception:
-        pass
 
     if mos and samples_by_model:
         raw_samples = generate_mos_samples(
@@ -252,13 +307,16 @@ async def get_forecast(
         return None
 
     # Step 9: Add observation uncertainty noise
-    # MOS already captures grid-to-station error, so use reduced noise
-    noise_scale = city.obs_uncertainty * 0.4 if use_mos else city.obs_uncertainty
+    # MOS already captures grid-to-station error, so use minimal noise
+    noise_scale = city.obs_uncertainty * 0.25 if use_mos else city.obs_uncertainty
     augmented = _augment_with_noise(raw_samples, noise_scale)
 
     # Step 10: Bayesian conditioning on current high (for today's markets)
     if current_high is not None and hours_remaining is not None:
-        augmented = bayesian_condition_on_current(augmented, current_high, hours_remaining)
+        augmented = bayesian_condition_on_current(
+            augmented, current_high, hours_remaining,
+            forecast_remaining_max=forecast_remaining_max,
+        )
 
     mean = float(np.mean(augmented))
     std = float(np.std(augmented))
@@ -290,6 +348,23 @@ async def _fetch_open_meteo_ensemble(
     Fetch ensemble forecast from Open-Meteo and return daily max temps
     for each ensemble member. Includes retry logic for transient failures.
     """
+    result = await _fetch_open_meteo_ensemble_batch(session, city, target_date, [model])
+    if model in result:
+        return (model, result[model])
+    return (None, [])
+
+
+async def _fetch_open_meteo_ensemble_batch(
+    session: aiohttp.ClientSession,
+    city: City,
+    target_date: date,
+    models: List[str],
+) -> Dict[str, List[float]]:
+    """
+    Fetch ensemble forecasts for MULTIPLE models in a single API call.
+    Open-Meteo supports comma-separated models parameter.
+    Returns {model_name: [daily_max_per_member, ...]}.
+    """
     date_str = target_date.isoformat()
     params = {
         "latitude": city.lat,
@@ -297,7 +372,7 @@ async def _fetch_open_meteo_ensemble(
         "hourly": "temperature_2m",
         "start_date": date_str,
         "end_date": date_str,
-        "models": model,
+        "models": ",".join(models),
     }
     if city.unit == "F":
         params["temperature_unit"] = "fahrenheit"
@@ -307,50 +382,153 @@ async def _fetch_open_meteo_ensemble(
             async with session.get(
                 OPEN_METEO_ENSEMBLE_URL,
                 params=params,
-                timeout=aiohttp.ClientTimeout(total=15),
+                timeout=aiohttp.ClientTimeout(total=20),
             ) as resp:
                 if resp.status == 429:  # Rate limited
+                    logger.warning(f"Open-Meteo 429 rate limit (attempt {attempt+1})")
+                    await asyncio.sleep(RETRY_DELAY * (2 ** attempt))
+                    continue
+                if resp.status != 200:
+                    logger.warning(f"Open-Meteo HTTP {resp.status}")
+                    return {}
+                data = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"Open-Meteo request failed: {e} (attempt {attempt+1})")
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            return {}
+
+        # Detect daily API limit (returns 200 OK with error in body)
+        if data.get("error"):
+            reason = data.get("reason", "unknown")
+            logger.error(f"Open-Meteo API error: {reason}")
+            return {}  # Fail fast, don't retry
+
+        hourly = data.get("hourly", {})
+        if not hourly:
+            return {}
+
+        # Parse per-model ensemble members from the combined response
+        # Keys look like: temperature_2m_member00_ecmwf_ifs025, etc.
+        # Or for single-model: temperature_2m_member00
+        result: Dict[str, List[float]] = {}
+
+        for model in models:
+            # Multi-model response: keys have model suffix
+            member_keys = sorted([
+                k for k in hourly.keys()
+                if k.startswith("temperature_2m_member") and k.endswith(f"_{model}")
+            ])
+
+            if not member_keys:
+                # Single-model fallback: keys without model suffix
+                if len(models) == 1:
+                    member_keys = sorted([
+                        k for k in hourly.keys()
+                        if k.startswith("temperature_2m_member")
+                    ])
+
+            if member_keys:
+                daily_maxes = []
+                for key in member_keys:
+                    values = hourly[key]
+                    valid = [v for v in values if v is not None]
+                    if valid:
+                        daily_maxes.append(max(valid))
+                if daily_maxes:
+                    result[model] = daily_maxes
+            else:
+                # Deterministic fallback: temperature_2m_MODEL
+                single_key = f"temperature_2m_{model}"
+                single = hourly.get(single_key, [])
+                if not single and len(models) == 1:
+                    single = hourly.get("temperature_2m", [])
+                valid = [v for v in single if v is not None]
+                if valid:
+                    result[model] = [max(valid)]
+
+        return result
+
+    return {}
+
+
+async def _fetch_mos_only_deterministic(
+    session: aiohttp.ClientSession,
+    city: City,
+    target_date: date,
+) -> Dict[str, tuple]:
+    """
+    Fetch deterministic daily max for ALL models in a single API call.
+
+    Returns {model_name: (det_val, synthetic_members)} where:
+      - det_val: raw deterministic daily max (exact value for MOS logging)
+      - synthetic_members: noisy samples for MOS-only models, [] for ensemble models
+
+    For MOS-only models (JMA, MeteoFrance, UKMO, KNMI): creates synthetic ensemble.
+    For ensemble models (ECMWF, GFS, etc.): returns empty members (real ensemble
+    data comes from the ensemble API). The det_val is logged for long-term MOS use.
+    """
+    date_str = target_date.isoformat()
+    params = {
+        "latitude": city.lat,
+        "longitude": city.lon,
+        "daily": "temperature_2m_max",
+        "start_date": date_str,
+        "end_date": date_str,
+        "models": ",".join(set(MOS_ONLY_MODELS + ENSEMBLE_MODELS)),
+    }
+    if city.unit == "F":
+        params["temperature_unit"] = "fahrenheit"
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            async with session.get(
+                OPEN_METEO_FORECAST_URL,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 429:
+                    logger.warning(f"Open-Meteo forecast 429 (attempt {attempt+1})")
                     await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                     continue
                 if resp.status != 200:
-                    return (None, [])
+                    return {}
                 data = await resp.json()
         except (aiohttp.ClientError, asyncio.TimeoutError):
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY * (attempt + 1))
                 continue
-            return (None, [])
+            return {}
 
-        hourly = data.get("hourly", {})
-        if not hourly:
-            return (None, [])
+        # Detect daily API limit
+        if data.get("error"):
+            logger.error(f"Open-Meteo forecast API error: {data.get('reason', 'unknown')}")
+            return {}
 
-        # Find all ensemble member columns: temperature_2m_member00, member01, etc.
-        member_keys = sorted([
-            k for k in hourly.keys()
-            if k.startswith("temperature_2m_member")
-        ])
+        daily = data.get("daily", {})
+        result: Dict[str, tuple] = {}
+        rng = np.random.default_rng()
+        std = MOS_ONLY_SYNTHETIC_STD_C * (1.8 if city.unit == "F" else 1.0)
+        mos_only_set = set(MOS_ONLY_MODELS)
 
-        if not member_keys:
-            # Some models return just "temperature_2m" (single deterministic)
-            single = hourly.get("temperature_2m", [])
-            if single:
-                valid = [v for v in single if v is not None]
-                if valid:
-                    return (model, [max(valid)])
-            return (None, [])
+        for key, values in daily.items():
+            if key == "time" or not key.startswith("temperature_2m_max_"):
+                continue
+            model_name = key.replace("temperature_2m_max_", "")
+            if values and values[0] is not None:
+                det_val = float(values[0])
+                if model_name in mos_only_set:
+                    # MOS-only models: create synthetic ensemble for forecast merge
+                    synthetic = rng.normal(det_val, std, size=MOS_ONLY_SYNTHETIC_MEMBERS)
+                    result[model_name] = (det_val, synthetic.tolist())
+                else:
+                    # Ensemble models: det_val logged for MOS, no synthetic needed
+                    result[model_name] = (det_val, [])
 
-        # For each member, compute daily max temperature
-        daily_maxes = []
-        for key in member_keys:
-            values = hourly[key]
-            valid = [v for v in values if v is not None]
-            if valid:
-                daily_maxes.append(max(valid))
+        return result
 
-        return (model, daily_maxes)
-
-    return (None, [])
+    return {}
 
 
 async def _fetch_deterministic_multimodel(
@@ -545,25 +723,44 @@ async def get_current_weather(
         if temp is None:
             return None
 
-        # Find today's high so far from hourly data
+        # Find today's high so far from hourly data AND forecast remaining max
         times = hourly.get("time", [])
         temps = hourly.get("temperature_2m", [])
         now_str = current.get("time", "")
 
         high_so_far = temp
+        forecast_remaining_max = None
         if times and temps:
+            future_temps = []
             for t, v in zip(times, temps):
-                if v is not None and t <= now_str:
-                    high_so_far = max(high_so_far, v)
+                if v is not None:
+                    if t <= now_str:
+                        high_so_far = max(high_so_far, v)
+                    else:
+                        future_temps.append(v)
+            if future_temps:
+                forecast_remaining_max = max(future_temps)
 
-        return CurrentWeather(
+        result = CurrentWeather(
             city_key=city_key,
             temperature=float(temp),
             apparent_temp=float(apparent) if apparent else float(temp),
             daily_high_so_far=float(high_so_far),
+            forecast_remaining_max=float(forecast_remaining_max) if forecast_remaining_max is not None else None,
             timestamp=datetime.now(timezone.utc),
             source="Open-Meteo",
         )
+
+        # Log current weather snapshot
+        try:
+            log_current_weather(
+                city_key, result.temperature, result.daily_high_so_far,
+                result.forecast_remaining_max, result.apparent_temp,
+            )
+        except Exception:
+            pass
+
+        return result
 
     return None
 
@@ -674,20 +871,35 @@ def calculate_bucket_probabilities(
     mu = forecast.mean
     sigma = forecast.std
 
+    # For MOS mode: fit Gaussian KDE on raw samples for smooth integration
+    kde = None
+    if forecast.mos_used and n >= 50:
+        try:
+            kde = gaussian_kde(samples, bw_method='silverman')
+        except Exception:
+            kde = None  # Fall back to empirical if KDE fails
+
     result = {}
     for bucket in buckets:
         # Bucket boundaries: ±0.5 to account for WU whole-degree rounding
         low_bound = bucket.low - 0.5 if bucket.low != float('-inf') else float('-inf')
         high_bound = bucket.high + 0.5 if bucket.high != float('inf') else float('inf')
 
-        count = float(np.sum((samples >= low_bound) & (samples < high_bound)))
-
-        if forecast.mos_used:
-            # MOS mode: pure empirical with Laplace smoothing
-            alpha = 1.0  # One pseudocount per bucket
+        if forecast.mos_used and kde is not None:
+            # KDE mode: smooth density integration over bucket range
+            # Handle infinite bounds by clamping to ±50 from mean
+            kde_low = low_bound if low_bound != float('-inf') else mu - 50
+            kde_high = high_bound if high_bound != float('inf') else mu + 50
+            prob = float(kde.integrate_box_1d(kde_low, kde_high))
+            prob = max(prob, 0.002)  # Floor to prevent zero-probability
+        elif forecast.mos_used:
+            # Fallback: pure empirical with Laplace smoothing
+            count = float(np.sum((samples >= low_bound) & (samples < high_bound)))
+            alpha = 1.0
             prob = (count + alpha) / (n + alpha * n_buckets)
         else:
             # Legacy mode: empirical + Student-t blend
+            count = float(np.sum((samples >= low_bound) & (samples < high_bound)))
             empirical_prob = count / n
             parametric_prob = _student_t_cdf(high_bound, mu, sigma) - _student_t_cdf(low_bound, mu, sigma)
             prob = 0.70 * empirical_prob + 0.30 * parametric_prob

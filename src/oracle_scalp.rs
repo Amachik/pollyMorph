@@ -13,7 +13,7 @@ use crate::execution::OrderExecutor;
 use crate::types::{MarketId, Side, OrderType, TimeInForce, TokenIdRegistry, TradeSignal, SignalUrgency, PreparedOrder};
 use crate::websocket::hash_asset_id;
 
-use ethers::types::U256;
+use ethers::types::{Address, U256};
 
 use futures_util::FutureExt;
 use rust_decimal::Decimal;
@@ -1061,12 +1061,13 @@ async fn run_background_redeem(
 
     // --- Fetch relay payload (nonce + relay address) ---
     let http_client = reqwest::Client::new();
-    let relay_payload: serde_json::Value = match http_client
-        .get(format!("{}/relay-payload", relayer_url))
-        .query(&[("address", eoa.as_str()), ("type", "proxy")])
-        .send().await
-        .and_then(|r| futures_util::FutureExt::boxed(async move { r.json().await }).into_inner())
-        .await
+    let relay_payload: serde_json::Value = match async {
+        let r = http_client
+            .get(format!("{}/relay-payload", relayer_url))
+            .query(&[("address", eoa.as_str()), ("type", "proxy")])
+            .send().await?;
+        r.json::<serde_json::Value>().await
+    }.await
     {
         Ok(v) => v,
         Err(e) => return RedeemResult {
@@ -1165,14 +1166,15 @@ async fn run_background_redeem(
     let timestamp = chrono::Utc::now().timestamp_millis().to_string();
     let body_str = request_body.to_string();
     let hmac_msg = format!("{}{}{}{}", timestamp, "POST", "/submit", body_str);
-    let hmac_key = base64::decode(&config.polymarket.api_secret).unwrap_or_default();
+    use base64::Engine as _;
+    let hmac_key = base64::engine::general_purpose::STANDARD.decode(&config.polymarket.api_secret).unwrap_or_default();
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&hmac_key)
         .unwrap_or_else(|_| <Hmac<Sha256> as Mac>::new_from_slice(b"key").unwrap());
     mac.update(hmac_msg.as_bytes());
     let sig_bytes = mac.finalize().into_bytes();
-    let builder_sig = base64::encode(sig_bytes);
+    let builder_sig = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
 
     let resp = http_client
         .post(format!("{}/submit", relayer_url))
@@ -1215,12 +1217,13 @@ async fn run_background_redeem(
     // Poll for confirmation (up to 60s)
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let poll: serde_json::Value = match http_client
-            .get(format!("{}/transaction", relayer_url))
-            .query(&[("id", tx_id.as_str())])
-            .send().await
-            .and_then(|r| futures_util::FutureExt::boxed(async move { r.json().await }).into_inner())
-            .await
+        let poll: serde_json::Value = match async {
+            let r = http_client
+                .get(format!("{}/transaction", relayer_url))
+                .query(&[("id", tx_id.as_str())])
+                .send().await?;
+            r.json::<serde_json::Value>().await
+        }.await
         {
             Ok(v) => v,
             Err(_) => continue,

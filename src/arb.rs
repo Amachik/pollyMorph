@@ -1453,10 +1453,10 @@ impl ArbEngine {
         let best_ask = ask_levels.first().map(|l| l.price).unwrap_or(1.0);
 
         let best_bid = if let Some(bids) = book.get("bids").and_then(|v| v.as_array()) {
-            bids.first()
-                .and_then(|b| b.get("price").and_then(|v| v.as_str()))
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0)
+            // Bids may arrive unsorted — find the highest price (true best bid)
+            bids.iter()
+                .filter_map(|b| b.get("price").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+                .fold(0.0_f64, f64::max)
         } else {
             0.0
         };
@@ -3514,11 +3514,10 @@ fn parse_ws_book(msg: &serde_json::Value) -> Option<TokenBook> {
     let best_ask = ask_levels.first().map(|l| l.price).unwrap_or(1.0);
 
     let best_bid = if let Some(bids) = msg.get("bids").and_then(|v| v.as_array()) {
-        // Bids come in descending order (best first)
-        bids.first()
-            .and_then(|b| b.get("price").and_then(|v| v.as_str()))
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.0)
+        // Bids may arrive unsorted — find the highest price (true best bid)
+        bids.iter()
+            .filter_map(|b| b.get("price").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+            .fold(0.0_f64, f64::max)
     } else {
         0.0
     };

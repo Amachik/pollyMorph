@@ -1353,8 +1353,14 @@ impl OrderExecutor {
             .parse()
             .map_err(|e| ExecutionError::SigningFailed(format!("Bad USDC addr: {}", e)))?;
 
-        let owner_addr = self.signer.address();
-        let owner: Address = Address::from_slice(owner_addr.as_slice());
+        // Use proxy wallet address if configured (it holds the USDC), else fall back to EOA
+        let owner: Address = if !self.config.polymarket.proxy_address.is_empty() {
+            self.config.polymarket.proxy_address.parse()
+                .map_err(|e| ExecutionError::SigningFailed(format!("Bad proxy addr: {}", e)))?
+        } else {
+            let eoa = self.signer.address();
+            Address::from_slice(eoa.as_slice())
+        };
 
         // ERC20 balanceOf(address) selector = 0x70a08231
         let call_data = ethers::abi::encode(&[Token::Address(owner)]);

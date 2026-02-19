@@ -731,8 +731,9 @@ impl OrderExecutor {
                                 status,
                             }));
                         } else {
+                            warn!("⚠️  success=true but no orderID — raw: {}", item);
                             all_results.push(Err(ExecutionError::ParseError(
-                                "success=true but no orderID".to_string()
+                                format!("success=true but no orderID: {}", item)
                             )));
                         }
                     } else {

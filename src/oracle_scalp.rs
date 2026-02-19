@@ -135,6 +135,8 @@ pub struct OracleEngine {
     ws_subscribed: HashSet<String>,
     ws_connected: bool,
     executing_slugs: HashSet<String>,
+    failed_slugs: HashSet<String>,
+    last_debug_log: HashMap<String, std::time::Instant>,
     sweep_rx: mpsc::Receiver<SweepResult>,
     sweep_tx: mpsc::Sender<SweepResult>,
     redeem_rx: mpsc::Receiver<RedeemResult>,
@@ -202,6 +204,8 @@ impl OracleEngine {
             tracked_markets, asset_to_market, ws_subscribed,
             ws_connected: false,
             executing_slugs: HashSet::new(),
+            failed_slugs: HashSet::new(),
+            last_debug_log: HashMap::new(),
             sweep_rx, sweep_tx, redeem_rx, redeem_tx,
             event_detail_cache: HashMap::new(),
         }
@@ -314,6 +318,7 @@ impl OracleEngine {
             None => return,
         };
         if self.executing_slugs.contains(&market.event_slug) { return; }
+        if self.failed_slugs.contains(&market.event_slug) { return; }
         if self.has_position(&market.event_slug) { return; }
 
         let now = chrono::Utc::now().timestamp();
@@ -345,8 +350,13 @@ impl OracleEngine {
             {
                 (SweptSide::Down, down_book)
             } else {
-                debug!("⏳ {} — unclear: Up={:.3} Down={:.3} ({:.0}s left)",
-                       market.title, up_book.best_ask, down_book.best_ask, secs_remaining);
+                let now_inst = std::time::Instant::now();
+                let last = self.last_debug_log.get(&market.event_slug).copied();
+                if last.map_or(true, |t| now_inst.duration_since(t).as_secs() >= 5) {
+                    debug!("⏳ {} — unclear: Up={:.3} Down={:.3} ({:.0}s left)",
+                           market.title, up_book.best_ask, down_book.best_ask, secs_remaining);
+                    self.last_debug_log.insert(market.event_slug.clone(), now_inst);
+                }
                 return;
             };
 
@@ -488,7 +498,9 @@ impl OracleEngine {
             });
             save_positions(&self.positions);
         } else {
-            error!("❌ ALL SWEEP ORDERS FAILED for {}", result.event_slug);
+            error!("❌ ALL SWEEP ORDERS FAILED for {} — marking as no-retry", result.event_slug);
+            self.failed_slugs.insert(result.event_slug.clone());
+            self.capital_usdc += result.estimated_cost;
         }
     }
 

@@ -59,6 +59,9 @@ const REPORT_BUFFER: usize = 1_000;
 
 #[tokio::main(flavor = "current_thread")] // Single-threaded for predictable latency
 async fn main() -> anyhow::Result<()> {
+    // Load .env file if present (ignored if missing)
+    dotenvy::dotenv().ok();
+
     // Initialize logging
     init_logging();
 

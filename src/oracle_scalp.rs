@@ -331,15 +331,14 @@ impl OracleEngine {
 
         // Determine winning side: the winning token is priced HIGH (near $1.00).
         // The AMM hasn't fully repriced yet — we buy before it does.
+        // Only require the winning side >= MIN_WINNING_PRICE and strictly dominant.
         let (winning_side, winning_book) =
             if up_book.best_ask >= MIN_WINNING_PRICE
                 && up_book.best_ask > down_book.best_ask
-                && down_book.best_ask < 0.50
             {
                 (SweptSide::Up, up_book)
             } else if down_book.best_ask >= MIN_WINNING_PRICE
                 && down_book.best_ask > up_book.best_ask
-                && up_book.best_ask < 0.50
             {
                 (SweptSide::Down, down_book)
             } else {

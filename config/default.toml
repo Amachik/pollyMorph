@@ -8,7 +8,7 @@ api_key = ""
 api_secret = ""
 api_passphrase = ""  # API passphrase from L1 key derivation
 private_key = ""  # Your wallet private key (hex, no 0x prefix)
-polygon_rpc = "https://polygon-rpc.com"
+polygon_rpc = ""
 clob_address = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 neg_risk_clob_address = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 

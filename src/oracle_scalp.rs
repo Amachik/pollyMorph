@@ -42,10 +42,10 @@ const POSITIONS_FILE: &str = "oracle_positions.json";
 /// Slug prefixes used in actual market slugs (e.g. "btc-updown-15m-1770801300")
 /// These are also used to identify asset type from the slug.
 const SERIES_SLUGS: &[&str] = &[
-    "btc-updown-15m",
-    "eth-updown-15m",
-    "sol-updown-15m",
-    "xrp-updown-15m",
+    "btc-up-or-down-15m",
+    "eth-up-or-down-15m",
+    "sol-up-or-down-15m",
+    "xrp-up-or-down-15m",
 ];
 
 // ---------------------------------------------------------------------------

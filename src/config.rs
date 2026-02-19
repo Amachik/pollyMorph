@@ -33,6 +33,8 @@ pub struct PolymarketConfig {
     pub api_passphrase: String,
     /// Private key for signing (hex-encoded, no 0x prefix)
     pub private_key: String,
+    /// Proxy wallet address (funder) — holds USDC, must be set for POLY_PROXY signature type
+    pub proxy_address: String,
     /// Polygon RPC endpoint
     pub polygon_rpc: String,
     /// CLOB contract address (standard markets)
@@ -260,6 +262,7 @@ impl Config {
         env_fallback!(cfg.polymarket.api_secret, "POLYMARKET_API_SECRET");
         env_fallback!(cfg.polymarket.api_passphrase, "POLYMARKET_API_PASSPHRASE");
         env_fallback!(cfg.polymarket.private_key, "POLYMARKET_PRIVATE_KEY");
+        env_fallback!(cfg.polymarket.proxy_address, "POLYMARKET_PROXY_ADDRESS");
         env_fallback!(cfg.polymarket.polygon_rpc, "POLYGON_RPC_URL");
         
         // REST URL: env var ALWAYS overrides TOML (needed for tunnel mode on VPS)
@@ -286,6 +289,7 @@ impl Config {
                 api_secret: std::env::var("POLYMARKET_API_SECRET").unwrap_or_default(),
                 api_passphrase: std::env::var("POLYMARKET_API_PASSPHRASE").unwrap_or_default(),
                 private_key: std::env::var("POLYMARKET_PRIVATE_KEY").unwrap_or_default(),
+                proxy_address: std::env::var("POLYMARKET_PROXY_ADDRESS").unwrap_or_default(),
                 polygon_rpc: std::env::var("POLYGON_RPC_URL")
                     .unwrap_or_else(|_| "https://polygon-rpc.com".to_string()),
                 clob_address: std::env::var("CLOB_CONTRACT_ADDRESS")

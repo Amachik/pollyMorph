@@ -45,6 +45,9 @@ pub struct OrderSigner {
     contract_address: Address,
     /// NegRisk exchange address
     neg_risk_contract_address: Address,
+    /// Proxy wallet address (funder). When set, uses POLY_PROXY signature type (1).
+    /// The proxy wallet holds USDC; the EOA wallet signs orders on its behalf.
+    proxy_address: Option<Address>,
     nonce_generator: NonceGenerator,
     /// Zero-allocation signature cache using DashMap for lock-free concurrent access
     signature_cache: Arc<DashMap<SignatureCacheKey, CachedSignature, ahash::RandomState>>,
@@ -108,12 +111,22 @@ impl OrderSigner {
         let domain_separator_standard = Self::compute_domain_separator(contract_address);
         let domain_separator_neg_risk = Self::compute_domain_separator(neg_risk_contract_address);
 
+        let proxy_address = std::env::var("POLYMARKET_PROXY_ADDRESS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<Address>().ok());
+
+        if proxy_address.is_some() {
+            info!("🔑 Using POLY_PROXY signature type (proxy wallet as maker)");
+        }
+
         Ok(Self {
             wallet,
             domain_separator_standard,
             domain_separator_neg_risk,
             contract_address,
             neg_risk_contract_address,
+            proxy_address,
             nonce_generator: NonceGenerator::new(),
             signature_cache: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
             cache_hits: AtomicU64::new(0),
@@ -141,6 +154,7 @@ impl OrderSigner {
             domain_separator_neg_risk,
             contract_address,
             neg_risk_contract_address,
+            proxy_address: None,
             nonce_generator: NonceGenerator::new(),
             signature_cache: Arc::new(DashMap::with_hasher(ahash::RandomState::new())),
             cache_hits: AtomicU64::new(0),
@@ -348,10 +362,13 @@ impl OrderSigner {
                 .as_secs() + expiration_secs
         };
 
-        let maker_addr = self.address();
+        let (maker_addr, signature_type) = if let Some(proxy) = self.proxy_address {
+            (proxy, 1u8) // POLY_PROXY: proxy wallet is maker, EOA signs
+        } else {
+            (self.address(), 0u8) // EOA: signer is also maker
+        };
         let signer_addr = self.address();
         let taker_addr = Address::ZERO;
-        let signature_type: u8 = 0; // EOA
 
         // Build the EIP-712 struct hash matching OrderStructs.sol
         let order_hash = self.compute_order_hash(

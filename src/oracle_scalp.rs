@@ -36,7 +36,7 @@ const MAX_LOSING_BID: f64 = 0.50;    // Losing side best_bid <= 50¢ — allow t
 const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee = 10% * 2 * min(p,1-p) → 0.6% at 0.97 → profit $0.024/token
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
-const MIN_ORDER_SIZE: f64 = 5.0;
+const MIN_ORDER_SIZE: f64 = 1.0;   // CLOB minimum ~1 token; sizing is dynamic based on balance
 const MARKET_SCAN_INTERVAL_SECS: u64 = 10;
 const PRE_MARKET_LEAD_SECS: i64 = 300;
 const WS_CHANNEL_BUFFER: usize = 1024;
@@ -584,7 +584,7 @@ impl OracleEngine {
         }
 
         let (total_tokens, total_cost) = self.compute_sweep(&winning_book);
-        if total_tokens < MIN_ORDER_SIZE || total_cost < 1.0 { return; }
+        if total_tokens < MIN_ORDER_SIZE || total_cost < 0.50 { return; }
 
         // Insert slug FIRST to block all subsequent WS-triggered evaluations
         self.executing_slugs.insert(market.event_slug.clone());
@@ -608,9 +608,9 @@ impl OracleEngine {
         for level in &book.ask_levels {
             if level.price > MAX_SWEEP_PRICE { break; }
             let remaining = max_usdc - cost;
-            if remaining < MIN_ORDER_SIZE * level.price { break; }
+            if remaining < 0.50 { break; } // need at least 50¢ to add a level
             let t = level.size.min(remaining / level.price);
-            if t < MIN_ORDER_SIZE && tokens == 0.0 { break; }
+            if t < 0.5 && tokens == 0.0 { break; } // first level must have some depth
             tokens += t;
             cost += t * level.price;
         }

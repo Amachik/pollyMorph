@@ -15,8 +15,9 @@ use crate::websocket::hash_asset_id;
 
 use ethers::types::{Address, U256};
 
-use futures_util::FutureExt;
+use futures_util::{FutureExt, StreamExt, SinkExt};
 use rust_decimal::Decimal;
+use tokio_tungstenite::{connect_async as tungstenite_connect, tungstenite::Message as WsMessage};
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -145,6 +146,8 @@ pub struct OracleEngine {
     event_detail_cache: HashMap<String, Vec<ArbMarket>>,
     /// Recent spot prices per asset: (timestamp, price), kept for last 90s
     spot_prices: HashMap<ArbAsset, VecDeque<(std::time::Instant, f64)>>,
+    /// Binance WebSocket price feed receiver
+    spot_rx: mpsc::Receiver<(ArbAsset, f64)>,
 }
 
 impl OracleEngine {
@@ -171,6 +174,11 @@ impl OracleEngine {
         let shutdown_for_ws = shutdown_flag.clone();
         tokio::spawn(async move {
             run_book_watcher(ws_event_tx, ws_cmd_rx, shutdown_for_ws).await;
+        });
+
+        let (spot_tx, spot_rx) = mpsc::channel::<(ArbAsset, f64)>(256);
+        tokio::spawn(async move {
+            run_spot_watcher(spot_tx).await;
         });
 
         let mut recovered = load_positions();
@@ -212,36 +220,21 @@ impl OracleEngine {
             sweep_rx, sweep_tx, redeem_rx, redeem_tx,
             event_detail_cache: HashMap::new(),
             spot_prices: HashMap::new(),
+            spot_rx,
         }
     }
 
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> { self.shutdown.clone() }
 
-    /// Fetch current spot price for all 4 assets from Binance and store in spot_prices.
-    async fn update_spot_prices(&mut self) {
-        let symbols = [
-            (ArbAsset::BTC, "BTCUSDT"),
-            (ArbAsset::ETH, "ETHUSDT"),
-            (ArbAsset::SOL, "SOLUSDT"),
-            (ArbAsset::XRP, "XRPUSDT"),
-        ];
+    /// Drain all pending spot price updates from the Binance WS channel into spot_prices.
+    fn drain_spot_prices(&mut self) {
         let now = std::time::Instant::now();
-        for (asset, sym) in &symbols {
-            let url = format!("https://api.binance.com/api/v3/ticker/price?symbol={}", sym);
-            match self.client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(v) = resp.json::<serde_json::Value>().await {
-                        if let Some(price) = v["price"].as_str().and_then(|s| s.parse::<f64>().ok()) {
-                            let deque = self.spot_prices.entry(*asset).or_insert_with(VecDeque::new);
-                            deque.push_back((now, price));
-                            // Keep only last 90s of data
-                            while deque.front().map_or(false, |(t, _)| now.duration_since(*t).as_secs() > 90) {
-                                deque.pop_front();
-                            }
-                        }
-                    }
-                }
-                _ => {}
+        while let Ok((asset, price)) = self.spot_rx.try_recv() {
+            let deque = self.spot_prices.entry(asset).or_insert_with(VecDeque::new);
+            deque.push_back((now, price));
+            // Keep only last 90s of data
+            while deque.front().map_or(false, |(t, _)| now.duration_since(*t).as_secs() > 90) {
+                deque.pop_front();
             }
         }
     }
@@ -312,7 +305,7 @@ impl OracleEngine {
                         info!("🛑 ORACLE ENGINE shutting down");
                         break;
                     }
-                    self.update_spot_prices().await;
+                    self.drain_spot_prices();
                     self.check_and_redeem().await;
                     self.discover_and_subscribe().await;
                 }
@@ -1392,5 +1385,65 @@ async fn run_background_redeem(
         event_slug: event_slug.to_string(),
         usdc_recovered: 0.0, profit: 0.0,
         error: Some(format!("Relayer tx timed out after 60s: {}", tx_id)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background task: Binance WebSocket spot price feed
+// ---------------------------------------------------------------------------
+
+/// Connects to Binance combined aggTrade stream for BTC/ETH/SOL/XRP.
+/// Sends (ArbAsset, price) on every trade event — essentially real-time.
+/// Reconnects automatically on disconnect.
+pub async fn run_spot_watcher(tx: mpsc::Sender<(ArbAsset, f64)>) {
+    const URL: &str = "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade";
+    let mut backoff = 1u64;
+
+    loop {
+        match tungstenite_connect(URL).await {
+            Ok((ws, _)) => {
+                info!("📈 Binance spot WS connected");
+                backoff = 1;
+                let (_, mut read) = ws.split();
+                loop {
+                    match read.next().await {
+                        Some(Ok(WsMessage::Text(txt))) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                                let data = &v["data"];
+                                let stream = v["stream"].as_str().unwrap_or("");
+                                let asset = if stream.starts_with("btc") { ArbAsset::BTC }
+                                    else if stream.starts_with("eth") { ArbAsset::ETH }
+                                    else if stream.starts_with("sol") { ArbAsset::SOL }
+                                    else if stream.starts_with("xrp") { ArbAsset::XRP }
+                                    else { continue };
+                                if let Some(price) = data["p"].as_str()
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                {
+                                    let _ = tx.try_send((asset, price));
+                                }
+                            }
+                        }
+                        Some(Ok(WsMessage::Ping(d))) => {
+                            // Binance sends pings; tungstenite auto-responds with pong
+                            let _ = d;
+                        }
+                        Some(Ok(WsMessage::Close(_))) | None => {
+                            warn!("📈 Binance spot WS closed — reconnecting in {}s", backoff);
+                            break;
+                        }
+                        Some(Err(e)) => {
+                            warn!("📈 Binance spot WS error: {} — reconnecting in {}s", e, backoff);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("📈 Binance spot WS connect failed: {} — retry in {}s", e, backoff);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+        backoff = (backoff * 2).min(30);
     }
 }

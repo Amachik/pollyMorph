@@ -1035,9 +1035,16 @@ async fn submit_sweep_orders(
             match result {
                 Ok(fill) => {
                     orders_ok += 1;
-                    // Polymarket batch POST always returns takingAmount=0 for FAK orders.
-                    // Queue matched orders for a follow-up GET /order/{id} poll.
-                    if !fill.order_id.is_empty() {
+                    let tokens_from_batch = fill.tokens_filled();
+                    let usdc_from_batch = fill.usdc_amount();
+                    if tokens_from_batch > 0.0 && usdc_from_batch > 0.0 {
+                        // Batch response already has fill amounts — use directly, skip poll
+                        tokens_total += tokens_from_batch;
+                        cost_total += usdc_from_batch;
+                        info!("   ✅ {} #{}: {:.4} tokens @ ${:.4} [{}] (batch)",
+                              side_label, k + 1, tokens_from_batch, usdc_from_batch, fill.status);
+                    } else if !fill.order_id.is_empty() {
+                        // Batch returned 0 amounts — queue for fill poll
                         info!("   📬 {} #{}: queued for fill poll → {} [{}]",
                               side_label, k + 1, fill.order_id, fill.status);
                         matched_order_ids.push((fill.order_id.clone(), req_size, req_price));

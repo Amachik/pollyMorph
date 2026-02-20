@@ -382,6 +382,7 @@ impl OracleEngine {
         let mut orders = Vec::new();
         let mut remaining = max_usdc;
         for level in &book.ask_levels {
+            if level.price > MAX_SWEEP_PRICE { break; }
             if remaining < MIN_ORDER_SIZE * level.price { break; }
             let tokens = level.size.min(remaining / level.price);
             if tokens < MIN_ORDER_SIZE { break; }

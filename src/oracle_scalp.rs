@@ -15,7 +15,7 @@ use crate::websocket::hash_asset_id;
 
 use ethers::types::{Address, U256};
 
-use futures_util::{FutureExt, StreamExt, SinkExt};
+use futures_util::{FutureExt, StreamExt};
 use rust_decimal::Decimal;
 use tokio_tungstenite::{connect_async as tungstenite_connect, tungstenite::Message as WsMessage};
 use rust_decimal::prelude::ToPrimitive;

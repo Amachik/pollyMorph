@@ -1624,10 +1624,9 @@ async fn run_background_redeem(
     let body_str = request_body.to_string();
     let hmac_msg = format!("{}{}{}{}", timestamp_str, "POST", "/submit", body_str);
     use base64::Engine as _;
+    // The secret is expected to be URL-safe base64 encoded
     let secret_trimmed = config.polymarket.api_secret.trim();
-    let hmac_key = match base64::engine::general_purpose::STANDARD.decode(secret_trimmed)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(secret_trimmed))
-    {
+    let hmac_key = match base64::engine::general_purpose::URL_SAFE.decode(secret_trimmed) {
         Ok(bytes) => bytes,
         Err(e) => {
             return RedeemResult {
@@ -1653,9 +1652,8 @@ async fn run_background_redeem(
     };
     mac.update(hmac_msg.as_bytes());
     let sig_bytes = mac.finalize().into_bytes();
-    let builder_sig = base64::engine::general_purpose::STANDARD.encode(sig_bytes)
-        .replace('+', "-")
-        .replace('/', "_");
+    // Use URL-safe base64 encoding directly instead of replacing characters
+    let builder_sig = base64::engine::general_purpose::URL_SAFE.encode(sig_bytes);
 
     let resp = http_client
         .post(format!("{}/submit", relayer_url))

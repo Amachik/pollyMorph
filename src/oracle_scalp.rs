@@ -29,10 +29,10 @@ use tracing::{info, warn, error, debug};
 // Constants
 // ---------------------------------------------------------------------------
 
-const ENTRY_WINDOW_SECS: i64 = 300;  // Enter in final 5 min — earlier = cheaper prices, more tokens
+const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profitable wallet timing
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_BID: f64 = 0.70;   // Winning side best_bid must be >= 70¢ — high confidence signal
-const MAX_LOSING_BID: f64 = 0.30;    // Losing side best_bid must be <= 30¢ — clear outcome required
+const MIN_WINNING_BID: f64 = 0.50;   // Winning side best_bid >= 50¢ — slight lean is enough
+const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — just need separation
 const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee = 10% * 2 * min(p,1-p) → 0.6% at 0.97 → profit $0.024/token
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;

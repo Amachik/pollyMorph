@@ -1619,15 +1619,36 @@ async fn run_background_redeem(
     });
 
     // Auth headers — same HMAC pattern as CLOB API
-    let timestamp = chrono::Utc::now().timestamp().to_string(); // seconds, not millis — SDK uses Math.floor(Date.now()/1000)
+    let timestamp = chrono::Utc::now().timestamp(); // seconds, not millis — SDK uses Math.floor(Date.now()/1000)
+    let timestamp_str = timestamp.to_string();
     let body_str = request_body.to_string();
-    let hmac_msg = format!("{}{}{}{}", timestamp, "POST", "/submit", body_str);
+    let hmac_msg = format!("{}{}{}{}", timestamp_str, "POST", "/submit", body_str);
     use base64::Engine as _;
-    let hmac_key = base64::engine::general_purpose::STANDARD.decode(&config.polymarket.api_secret).unwrap_or_default();
+    let secret_trimmed = config.polymarket.api_secret.trim();
+    let hmac_key = match base64::engine::general_purpose::STANDARD.decode(secret_trimmed) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return RedeemResult {
+                event_slug: event_slug.to_string(),
+                usdc_recovered: 0.0,
+                profit: 0.0,
+                error: Some(format!("Invalid builder API secret (base64 decode failed): {}", e)),
+            }
+        }
+    };
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&hmac_key)
-        .unwrap_or_else(|_| <Hmac<Sha256> as Mac>::new_from_slice(b"key").unwrap());
+    let mut mac = match <Hmac<Sha256> as Mac>::new_from_slice(&hmac_key) {
+        Ok(m) => m,
+        Err(e) => {
+            return RedeemResult {
+                event_slug: event_slug.to_string(),
+                usdc_recovered: 0.0,
+                profit: 0.0,
+                error: Some(format!("Invalid builder API secret length: {}", e)),
+            }
+        }
+    };
     mac.update(hmac_msg.as_bytes());
     let sig_bytes = mac.finalize().into_bytes();
     let builder_sig = base64::engine::general_purpose::STANDARD.encode(sig_bytes)
@@ -1638,7 +1659,7 @@ async fn run_background_redeem(
         .post(format!("{}/submit", relayer_url))
         .header("Content-Type", "application/json")
         .header("POLY_BUILDER_API_KEY", &config.polymarket.api_key)
-        .header("POLY_BUILDER_TIMESTAMP", &timestamp)
+        .header("POLY_BUILDER_TIMESTAMP", &timestamp_str)
         .header("POLY_BUILDER_PASSPHRASE", &config.polymarket.api_passphrase)
         .header("POLY_BUILDER_SIGNATURE", &builder_sig)
         .body(body_str)

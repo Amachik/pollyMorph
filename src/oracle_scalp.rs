@@ -1630,7 +1630,9 @@ async fn run_background_redeem(
         .unwrap_or_else(|_| <Hmac<Sha256> as Mac>::new_from_slice(b"key").unwrap());
     mac.update(hmac_msg.as_bytes());
     let sig_bytes = mac.finalize().into_bytes();
-    let builder_sig = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
+    let builder_sig = base64::engine::general_purpose::STANDARD.encode(sig_bytes)
+        .replace('+', "-")
+        .replace('/', "_");
 
     let resp = http_client
         .post(format!("{}/submit", relayer_url))

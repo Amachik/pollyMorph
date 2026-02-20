@@ -52,10 +52,6 @@ const SERIES_SLUGS: &[&str] = &[
     "eth-up-or-down-5m",
     "sol-up-or-down-5m",
     "xrp-up-or-down-5m",
-    "btc-up-or-down-1h",
-    "eth-up-or-down-1h",
-    "sol-up-or-down-1h",
-    "xrp-up-or-down-1h",
 ];
 
 // ---------------------------------------------------------------------------
@@ -861,7 +857,6 @@ impl OracleEngine {
         candidates.sort_by_key(|(_, ts)| *ts);
         // Keep only the next N events based on market duration
         let keep = if series_slug.contains("-5m") { 3 }       // 15 min coverage
-                   else if series_slug.contains("-1h") { 3 }  // 3 hour coverage
                    else { 8 };                                 // 15m: 2 hour coverage
         candidates.truncate(keep);
 

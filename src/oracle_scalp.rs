@@ -31,9 +31,9 @@ use tracing::{info, warn, error, debug};
 
 const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profitable wallet timing
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_BID: f64 = 0.60;   // Winning side best_bid >= 60¢ — clear lean, avoids coin-flip trades
-const MAX_LOSING_BID: f64 = 0.40;    // Losing side best_bid <= 40¢ — complementary threshold
-const MAX_SWEEP_PRICE: f64 = 0.999;  // Hard cap — buying at 0.999 still nets $0.001/token after fees at resolution
+const MIN_WINNING_BID: f64 = 0.85;   // Winning side best_bid >= 85¢ — market already decided
+const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
+const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee ceiling: Poly fee ~2%*min(p,1-p) → at 0.97 fee≈0.6%, profit $0.024/token
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;

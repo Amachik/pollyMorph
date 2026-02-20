@@ -147,7 +147,7 @@ pub struct OracleEngine {
     /// Recent spot prices per asset: (timestamp, price), kept for last 90s
     spot_prices: HashMap<ArbAsset, VecDeque<(std::time::Instant, f64)>>,
     /// Binance WebSocket price feed receiver
-    spot_rx: mpsc::Receiver<(ArbAsset, f64)>,
+    spot_rx: mpsc::Receiver<(ArbAsset, f64, std::time::Instant)>,
 }
 
 impl OracleEngine {
@@ -176,7 +176,7 @@ impl OracleEngine {
             run_book_watcher(ws_event_tx, ws_cmd_rx, shutdown_for_ws).await;
         });
 
-        let (spot_tx, spot_rx) = mpsc::channel::<(ArbAsset, f64)>(256);
+        let (spot_tx, spot_rx) = mpsc::channel::<(ArbAsset, f64, std::time::Instant)>(256);
         tokio::spawn(async move {
             run_spot_watcher(spot_tx).await;
         });
@@ -229,9 +229,9 @@ impl OracleEngine {
     /// Drain all pending spot price updates from the Binance WS channel into spot_prices.
     fn drain_spot_prices(&mut self) {
         let now = std::time::Instant::now();
-        while let Ok((asset, price)) = self.spot_rx.try_recv() {
+        while let Ok((asset, price, received_at)) = self.spot_rx.try_recv() {
             let deque = self.spot_prices.entry(asset).or_insert_with(VecDeque::new);
-            deque.push_back((now, price));
+            deque.push_back((received_at, price));
             // Keep only last 90s of data
             while deque.front().map_or(false, |(t, _)| now.duration_since(*t).as_secs() > 90) {
                 deque.pop_front();
@@ -387,8 +387,10 @@ impl OracleEngine {
             match momentum {
                 None => true, // no data yet — allow
                 Some(pct) => match side {
-                    SweptSide::Up   => pct >= -0.05, // price not falling hard
-                    SweptSide::Down => pct <= 0.05,  // price not rising hard
+                    // Up signal: price must not be falling (allow flat or rising)
+                    SweptSide::Up   => pct >= -0.02,
+                    // Down signal: price must not be rising (allow flat or falling)
+                    SweptSide::Down => pct <= 0.02,
                 },
             }
         };
@@ -537,13 +539,13 @@ impl OracleEngine {
                   result.event_slug, err, result.estimated_cost);
             return;
         }
-        // Refund the difference between reserved and actually spent
-        self.capital_usdc += result.estimated_cost - result.cost_total;
         let side_label = match result.swept_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
         info!("📊 SWEEP: {} | {}/{} filled | {:.0} {} tokens | ${:.2} | {:.0}ms",
               result.event_slug, result.orders_ok, result.orders_count,
               result.tokens_total, side_label, result.cost_total, result.total_elapsed_ms);
         if result.tokens_total > 0.0 {
+            // Refund only the unspent portion
+            self.capital_usdc += result.estimated_cost - result.cost_total;
             let avg = result.cost_total / result.tokens_total.max(0.001);
             info!("   ✅ {:.0} {} tokens @ avg ${:.4} | edge: ${:.4}/token",
                   result.tokens_total, side_label, avg, 1.0 - avg);
@@ -557,9 +559,10 @@ impl OracleEngine {
             });
             save_positions(&self.positions);
         } else {
+            // Full refund — nothing was actually spent
+            self.capital_usdc += result.estimated_cost;
             error!("❌ ALL SWEEP ORDERS FAILED for {} — marking as no-retry", result.event_slug);
             self.failed_slugs.insert(result.event_slug.clone());
-            self.capital_usdc += result.estimated_cost;
         }
     }
 
@@ -1395,7 +1398,7 @@ async fn run_background_redeem(
 /// Connects to Binance combined aggTrade stream for BTC/ETH/SOL/XRP.
 /// Sends (ArbAsset, price) on every trade event — essentially real-time.
 /// Reconnects automatically on disconnect.
-pub async fn run_spot_watcher(tx: mpsc::Sender<(ArbAsset, f64)>) {
+pub async fn run_spot_watcher(tx: mpsc::Sender<(ArbAsset, f64, std::time::Instant)>) {
     const URL: &str = "wss://stream.binance.com:9443/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/solusdt@aggTrade/xrpusdt@aggTrade";
     let mut backoff = 1u64;
 
@@ -1419,7 +1422,7 @@ pub async fn run_spot_watcher(tx: mpsc::Sender<(ArbAsset, f64)>) {
                                 if let Some(price) = data["p"].as_str()
                                     .and_then(|s| s.parse::<f64>().ok())
                                 {
-                                    let _ = tx.try_send((asset, price));
+                                    let _ = tx.try_send((asset, price, std::time::Instant::now()));
                                 }
                             }
                         }

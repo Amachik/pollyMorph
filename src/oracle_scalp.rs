@@ -156,6 +156,8 @@ pub struct OracleEngine {
     last_reconcile: std::time::Instant,
     /// Set after a fill or balance error — triggers on-chain balance refresh on next scan tick
     needs_balance_refresh: bool,
+    /// Cooldown: last time a signal was fired or attempted — prevents WS burst spam
+    last_signal_fired: std::time::Instant,
 }
 
 impl OracleEngine {
@@ -231,6 +233,7 @@ impl OracleEngine {
             spot_rx,
             last_reconcile: std::time::Instant::now(),
             needs_balance_refresh: false,
+            last_signal_fired: std::time::Instant::now() - std::time::Duration::from_secs(10),
         }
     }
 
@@ -426,6 +429,8 @@ impl OracleEngine {
         if self.failed_slugs.contains(&market.event_slug) { return; }
         // Block new sweeps while ANY sweep is in-flight — on-chain balance is shared
         if !self.executing_slugs.is_empty() { return; }
+        // Cooldown: don't re-evaluate signals within 2s of the last attempt
+        if self.last_signal_fired.elapsed().as_millis() < 2000 { return; }
         // Allow scaling into a position if price has moved further in our favor.
         // Only block if we already hold >= 90% of max capital in this market.
         if let Some(pos) = self.positions.iter().find(|p| p.market.event_slug == market.event_slug && !p.redeemed) {
@@ -493,12 +498,15 @@ impl OracleEngine {
         let (total_tokens, total_cost) = self.compute_sweep(&winning_book);
         if total_tokens < MIN_ORDER_SIZE || total_cost < 1.0 { return; }
 
+        // Insert slug FIRST to block all subsequent WS-triggered evaluations
+        self.executing_slugs.insert(market.event_slug.clone());
+        self.last_signal_fired = std::time::Instant::now();
+
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
         let mom_str = momentum.map_or("n/a".to_string(), |m| format!("{:+.3}%", m));
         info!("🎯 ORACLE SIGNAL: {} | {} @ {:.3} | {:.0} tokens | ${:.2} cost | {:.0}s left | spot {}",
               market.title, side_label, winning_book.best_ask, total_tokens, total_cost, secs_remaining, mom_str);
 
-        self.executing_slugs.insert(market.event_slug.clone());
         self.execute_sweep(&market, winning_side, total_tokens, total_cost);
     }
 
@@ -532,6 +540,7 @@ impl OracleEngine {
         if available < MIN_ORDER_SIZE {
             warn!("Insufficient capital: ${:.2}", self.capital_usdc);
             self.executing_slugs.remove(&market.event_slug);
+            self.failed_slugs.insert(market.event_slug.clone());
             return;
         }
 
@@ -553,6 +562,7 @@ impl OracleEngine {
         let sz_final = (sz_capped * 10000.0).round() / 10000.0;
         if sz_final < MIN_ORDER_SIZE {
             self.executing_slugs.remove(&market.event_slug);
+            self.failed_slugs.insert(market.event_slug.clone());
             return;
         }
 
@@ -945,6 +955,8 @@ impl OracleEngine {
                 let _ = self.ws_cmd_tx.send(WsCommand::Unsubscribe(ids)).await;
                 debug!("🗑️  Dropped expired market: {}", slug);
             }
+            self.failed_slugs.remove(slug);
+            self.executing_slugs.remove(slug);
         }
     }
 

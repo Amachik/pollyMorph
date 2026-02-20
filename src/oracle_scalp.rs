@@ -28,9 +28,10 @@ use tracing::{info, warn, error, debug};
 // Constants
 // ---------------------------------------------------------------------------
 
-const ENTRY_WINDOW_SECS: i64 = 120;
-const MIN_SECS_REMAINING: i64 = 15;
-const MIN_WINNING_PRICE: f64 = 0.52;
+const ENTRY_WINDOW_SECS: i64 = 60;   // Only enter in final 60s — outcome much more certain
+const MIN_SECS_REMAINING: i64 = 10;
+const MIN_WINNING_PRICE: f64 = 0.90; // Require strong conviction: winning side >= 90¢
+const MAX_LOSING_PRICE: f64 = 0.15;  // Losing side must be cheap — confirms clear outcome
 const MAX_SWEEP_PRICE: f64 = 0.85;  // 10% taker fee -> net cost 0.935, min profit $0.065/token
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
@@ -341,12 +342,12 @@ impl OracleEngine {
         let (winning_side, winning_book) =
             if up_book.best_ask >= MIN_WINNING_PRICE
                 && up_book.best_ask <= MAX_SWEEP_PRICE
-                && up_book.best_ask > down_book.best_ask
+                && down_book.best_ask <= MAX_LOSING_PRICE
             {
                 (SweptSide::Up, up_book)
             } else if down_book.best_ask >= MIN_WINNING_PRICE
                 && down_book.best_ask <= MAX_SWEEP_PRICE
-                && down_book.best_ask > up_book.best_ask
+                && up_book.best_ask <= MAX_LOSING_PRICE
             {
                 (SweptSide::Down, down_book)
             } else {

@@ -31,9 +31,9 @@ use tracing::{info, warn, error, debug};
 
 const ENTRY_WINDOW_SECS: i64 = 300;  // Enter in final 5 min — earlier = cheaper prices, more tokens
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_PRICE: f64 = 0.80; // Winning side must be >= 80¢ — high confidence, still room to profit
-const MAX_LOSING_PRICE: f64 = 0.16;  // Losing side must be <= 16¢ — clear outcome required
-const MAX_SWEEP_PRICE: f64 = 0.88;  // 10% taker fee -> net cost 0.968, profit $0.032/token at 0.88
+const MIN_WINNING_BID: f64 = 0.70;   // Winning side best_bid must be >= 70¢ — high confidence signal
+const MAX_LOSING_BID: f64 = 0.30;    // Losing side best_bid must be <= 30¢ — clear outcome required
+const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee = 10% * 2 * min(p,1-p) → 0.6% at 0.97 → profit $0.024/token
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 5.0;
@@ -261,7 +261,7 @@ impl OracleEngine {
     pub async fn run(&mut self) {
         info!("🎯 ORACLE ENGINE STARTED — Capital: ${:.2}", self.capital_usdc);
         info!("   Strategy: Sweep winning side in final {}s of 15m markets", ENTRY_WINDOW_SECS);
-        info!("   Max bet: ${:.0} | Min winning price: {:.2}", MAX_BET_USDC, MIN_WINNING_PRICE);
+        info!("   Max bet: ${:.0} | Min winning bid: {:.2} | Max sweep: {:.2}", MAX_BET_USDC, MIN_WINNING_BID, MAX_SWEEP_PRICE);
 
         if !self.ws_subscribed.is_empty() {
             let ids: Vec<String> = self.ws_subscribed.iter().cloned().collect();
@@ -385,35 +385,30 @@ impl OracleEngine {
             None => return,
         };
 
-        // Determine winning side: the winning token is priced HIGH (near $1.00).
-        // The AMM hasn't fully repriced yet — we buy before it does.
-        // Only require the winning side >= MIN_WINNING_PRICE and strictly dominant.
-        // Cap at MAX_SWEEP_PRICE: 10% taker fee means buying at 0.85 costs $0.935 net.
+        // Determine winning side using best_bid (not best_ask).
+        // In binary markets, the winning token has high bids (near $1), losing has low bids (near $0).
+        // We then sweep the winning side's ask book up to MAX_SWEEP_PRICE.
+        // Fee formula: fee_rate = baseFee(10%) * 2 * min(p, 1-p) — very low at high prices.
         // Spot price momentum check: require price to be moving in the oracle direction.
-        // Use 30s window; if no data yet, allow trade (fail-open on first startup).
         let momentum = self.spot_momentum(market.asset, 30);
         let momentum_ok = |side: SweptSide| -> bool {
             match momentum {
                 None => true, // no data yet — allow
                 Some(pct) => match side {
-                    // Up signal: price must not be falling (allow flat or rising)
                     SweptSide::Up   => pct >= -0.02,
-                    // Down signal: price must not be rising (allow flat or falling)
                     SweptSide::Down => pct <= 0.02,
                 },
             }
         };
 
         let (winning_side, winning_book) =
-            if up_book.best_ask >= MIN_WINNING_PRICE
-                && up_book.best_ask <= MAX_SWEEP_PRICE
-                && down_book.best_ask <= MAX_LOSING_PRICE
+            if up_book.best_bid >= MIN_WINNING_BID
+                && down_book.best_bid <= MAX_LOSING_BID
                 && momentum_ok(SweptSide::Up)
             {
                 (SweptSide::Up, up_book)
-            } else if down_book.best_ask >= MIN_WINNING_PRICE
-                && down_book.best_ask <= MAX_SWEEP_PRICE
-                && up_book.best_ask <= MAX_LOSING_PRICE
+            } else if down_book.best_bid >= MIN_WINNING_BID
+                && up_book.best_bid <= MAX_LOSING_BID
                 && momentum_ok(SweptSide::Down)
             {
                 (SweptSide::Down, down_book)
@@ -421,8 +416,8 @@ impl OracleEngine {
                 let now_inst = std::time::Instant::now();
                 let last = self.last_debug_log.get(&market.event_slug).copied();
                 if last.map_or(true, |t| now_inst.duration_since(t).as_secs() >= 5) {
-                    debug!("⏳ {} — unclear: Up={:.3} Down={:.3} ({:.0}s left)",
-                           market.title, up_book.best_ask, down_book.best_ask, secs_remaining);
+                    debug!("⏳ {} — unclear: UpBid={:.3} DownBid={:.3} ({:.0}s left)",
+                           market.title, up_book.best_bid, down_book.best_bid, secs_remaining);
                     self.last_debug_log.insert(market.event_slug.clone(), now_inst);
                 }
                 return;

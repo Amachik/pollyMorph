@@ -154,6 +154,8 @@ pub struct OracleEngine {
     spot_rx: mpsc::Receiver<(ArbAsset, f64, std::time::Instant)>,
     /// Last time we reconciled positions against the data API
     last_reconcile: std::time::Instant,
+    /// Set after a fill or balance error — triggers on-chain balance refresh on next scan tick
+    needs_balance_refresh: bool,
 }
 
 impl OracleEngine {
@@ -228,10 +230,34 @@ impl OracleEngine {
             spot_prices: HashMap::new(),
             spot_rx,
             last_reconcile: std::time::Instant::now(),
+            needs_balance_refresh: false,
         }
     }
 
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> { self.shutdown.clone() }
+
+    /// Refresh capital_usdc from on-chain USDC balance.
+    /// Called after fills or balance errors to keep internal tracking in sync with reality.
+    async fn refresh_onchain_balance(&mut self) {
+        self.needs_balance_refresh = false;
+        match self.executor.fetch_usdc_balance().await {
+            Ok(balance) => {
+                let deployed: f64 = self.positions.iter()
+                    .filter(|p| !p.redeemed)
+                    .map(|p| p.cost_usdc)
+                    .sum();
+                // Available capital = on-chain balance (don't double-count deployed positions
+                // since that USDC is already spent on-chain)
+                let old = self.capital_usdc;
+                self.capital_usdc = balance;
+                info!("💰 Balance refresh: on-chain ${:.2}, deployed ${:.2}, available ${:.2} (was ${:.2})",
+                      balance, deployed, self.capital_usdc, old);
+            }
+            Err(e) => {
+                warn!("⚠️  Balance refresh failed: {}", e);
+            }
+        }
+    }
 
     /// Drain all pending spot price updates from the Binance WS channel into spot_prices.
     fn drain_spot_prices(&mut self) {
@@ -303,6 +329,9 @@ impl OracleEngine {
                 }
                 r = self.sweep_rx.recv() => {
                     if let Some(r) = r { self.handle_sweep_result(r); }
+                    if self.needs_balance_refresh {
+                        self.refresh_onchain_balance().await;
+                    }
                 }
                 r = self.redeem_rx.recv() => {
                     if let Some(r) = r { self.handle_redeem_result(r); }
@@ -586,8 +615,8 @@ impl OracleEngine {
               result.event_slug, result.orders_ok, result.orders_count,
               result.tokens_total, side_label, result.cost_total, result.total_elapsed_ms);
         if result.tokens_total > 0.0 {
-            // Refund only the unspent portion
-            self.capital_usdc += result.estimated_cost - result.cost_total;
+            // Successful fill — refresh on-chain balance to keep capital tracking accurate
+            self.needs_balance_refresh = true;
             let avg = result.cost_total / result.tokens_total.max(0.001);
             info!("   ✅ {:.0} {} tokens @ avg ${:.4} | edge: ${:.4}/token",
                   result.tokens_total, side_label, avg, 1.0 - avg);
@@ -601,7 +630,12 @@ impl OracleEngine {
             });
             save_positions(&self.positions);
         } else {
-            // Full refund — nothing was actually spent
+            // All orders failed — refresh on-chain balance to detect if a previous
+            // fill actually spent our USDC (the CLOB returns "not enough balance"
+            // but result.error is None because individual failures aren't propagated)
+            self.needs_balance_refresh = true;
+            // Full refund — nothing was actually spent (if balance refresh shows
+            // otherwise, it will correct capital_usdc)
             self.capital_usdc += result.estimated_cost;
             error!("❌ ALL SWEEP ORDERS FAILED for {} — marking as no-retry", result.event_slug);
             self.failed_slugs.insert(result.event_slug.clone());
@@ -637,8 +671,11 @@ impl OracleEngine {
         if now.duration_since(self.last_reconcile).as_secs() < 30 { return; }
         self.last_reconcile = now;
 
+        let now_utc = chrono::Utc::now();
         let active: Vec<_> = self.positions.iter()
             .filter(|p| !p.redeemed && !self.executing_slugs.contains(&p.market.event_slug))
+            // Grace period: skip positions younger than 5 minutes — data API may not have indexed them yet
+            .filter(|p| (now_utc - p.entered_at).num_seconds() > 300)
             .cloned()
             .collect();
         if active.is_empty() { return; }

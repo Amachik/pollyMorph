@@ -1421,6 +1421,50 @@ impl OrderExecutor {
         Ok(balance)
     }
 
+    /// Fetch current on-chain USDC.e balance in human-readable dollars.
+    /// Does NOT modify capital limits — caller decides what to do with the value.
+    pub async fn fetch_usdc_balance(&self) -> Result<f64, ExecutionError> {
+        use ethers::prelude::*;
+        use ethers::abi::Token;
+
+        let rpc_url = &self.config.polymarket.polygon_rpc;
+        let provider = Provider::<Http>::try_from(rpc_url.as_str())
+            .map_err(|e| ExecutionError::NetworkError(format!("RPC provider: {}", e)))?;
+
+        let usdc_addr: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            .parse()
+            .map_err(|e| ExecutionError::SigningFailed(format!("Bad USDC addr: {}", e)))?;
+
+        let owner: Address = if !self.config.polymarket.proxy_address.is_empty() {
+            self.config.polymarket.proxy_address.parse()
+                .map_err(|e| ExecutionError::SigningFailed(format!("Bad proxy addr: {}", e)))?
+        } else {
+            let eoa = self.signer.address();
+            Address::from_slice(eoa.as_slice())
+        };
+
+        let call_data = ethers::abi::encode(&[Token::Address(owner)]);
+        let mut full_data = vec![0x70, 0xa0, 0x82, 0x31];
+        full_data.extend_from_slice(&call_data);
+
+        let tx = TransactionRequest::new()
+            .to(usdc_addr)
+            .data(full_data);
+
+        let result = provider.call(&tx.into(), None).await
+            .map_err(|e| ExecutionError::NetworkError(format!("balanceOf call: {}", e)))?;
+
+        let balance = if result.len() >= 32 {
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&result[16..32]);
+            u128::from_be_bytes(bytes)
+        } else {
+            0
+        };
+
+        Ok(balance as f64 / 1_000_000.0)
+    }
+
     /// Fetch positions from Polymarket APIs to bootstrap inventory.
     /// Tries two sources: (1) data-api /positions (current holdings), (2) CLOB /trades (fallback).
     /// Returns the number of positions bootstrapped.

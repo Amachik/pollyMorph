@@ -152,6 +152,8 @@ pub struct OracleEngine {
     spot_prices: HashMap<ArbAsset, VecDeque<(std::time::Instant, f64)>>,
     /// Binance WebSocket price feed receiver
     spot_rx: mpsc::Receiver<(ArbAsset, f64, std::time::Instant)>,
+    /// Last time we reconciled positions against the data API
+    last_reconcile: std::time::Instant,
 }
 
 impl OracleEngine {
@@ -225,6 +227,7 @@ impl OracleEngine {
             event_detail_cache: HashMap::new(),
             spot_prices: HashMap::new(),
             spot_rx,
+            last_reconcile: std::time::Instant::now(),
         }
     }
 
@@ -310,6 +313,7 @@ impl OracleEngine {
                         break;
                     }
                     self.drain_spot_prices();
+                    self.reconcile_positions().await;
                     self.check_and_redeem().await;
                     self.discover_and_subscribe().await;
                 }
@@ -596,6 +600,87 @@ impl OracleEngine {
 
     fn has_position(&self, event_slug: &str) -> bool {
         self.positions.iter().any(|p| p.market.event_slug == event_slug && !p.redeemed)
+    }
+
+    /// Reconcile internal positions against the Polymarket data API.
+    /// If a position's token no longer appears in on-chain holdings (e.g. sold via UI),
+    /// drop it and refund the reserved capital so the bot can trade again.
+    async fn reconcile_positions(&mut self) {
+        // Throttle: only check every 30 seconds
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_reconcile).as_secs() < 30 { return; }
+        self.last_reconcile = now;
+
+        let active: Vec<_> = self.positions.iter()
+            .filter(|p| !p.redeemed && !self.executing_slugs.contains(&p.market.event_slug))
+            .cloned()
+            .collect();
+        if active.is_empty() { return; }
+
+        // Query data API for actual token holdings
+        let addr = self.executor.wallet_address();
+        let url = format!(
+            "https://data-api.polymarket.com/positions?user={}&sizeThreshold=0.1",
+            addr
+        );
+        let resp = match self.client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                debug!("Reconcile: data-api returned {}", r.status());
+                return;
+            }
+            Err(e) => {
+                debug!("Reconcile: data-api error: {}", e);
+                return;
+            }
+        };
+        let held_assets: HashSet<String> = match resp.json::<serde_json::Value>().await {
+            Ok(val) => {
+                let arr = val.as_array()
+                    .or_else(|| val.get("data").and_then(|d| d.as_array()));
+                match arr {
+                    Some(positions) => positions.iter()
+                        .filter_map(|p| {
+                            let size = p["size"].as_f64().unwrap_or(0.0);
+                            if size > 0.1 {
+                                p["asset"].as_str().map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    None => return,
+                }
+            }
+            Err(_) => return,
+        };
+
+        // Check each active position — if its token is not in held_assets, it was sold externally
+        let mut dropped = Vec::new();
+        for pos in &active {
+            let token_id = match pos.swept_side {
+                SweptSide::Up => &pos.market.up_token_id,
+                SweptSide::Down => &pos.market.down_token_id,
+            };
+            if !held_assets.contains(token_id) {
+                dropped.push(pos.clone());
+            }
+        }
+
+        for pos in &dropped {
+            let side_label = match pos.swept_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
+            warn!("🔄 RECONCILE: {} {} sold externally — refunding ${:.2} reserved capital",
+                  pos.market.title, side_label, pos.cost_usdc);
+            self.capital_usdc += pos.cost_usdc;
+            self.positions.retain(|p| {
+                !(p.market.event_slug == pos.market.event_slug && !p.redeemed)
+            });
+        }
+        if !dropped.is_empty() {
+            save_positions(&self.positions);
+            info!("🔄 Reconciled: dropped {} externally-sold positions, capital now ${:.2}",
+                  dropped.len(), self.capital_usdc);
+        }
     }
 
     async fn check_and_redeem(&mut self) {

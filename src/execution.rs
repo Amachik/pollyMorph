@@ -770,6 +770,11 @@ impl OrderExecutor {
         &self.config.polymarket.rest_url
     }
 
+    /// Pre-formatted wallet address string (0x-prefixed hex).
+    pub fn wallet_address(&self) -> &str {
+        &self.cached_address
+    }
+
     /// Shared HTTP client for fill polling requests.
     pub fn http_client(&self) -> &reqwest::Client {
         &self.client

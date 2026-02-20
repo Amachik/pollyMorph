@@ -770,10 +770,16 @@ impl OracleEngine {
         self.last_reconcile = now;
 
         let now_utc = chrono::Utc::now();
+        let now_ts = now_utc.timestamp();
         let active: Vec<_> = self.positions.iter()
             .filter(|p| !p.redeemed && !self.executing_slugs.contains(&p.market.event_slug))
             // Grace period: skip positions younger than 5 minutes — data API may not have indexed them yet
             .filter(|p| (now_utc - p.entered_at).num_seconds() > 300)
+            // CRITICAL: skip positions in markets that have already ended.
+            // After resolution, winning tokens disappear from the data API (they are settled
+            // on-chain). This is NOT an external sale — check_and_redeem handles these.
+            // Reconciling them here would drop the position before we can claim.
+            .filter(|p| p.market.event_end_ts > now_ts)
             .cloned()
             .collect();
         if active.is_empty() { return; }

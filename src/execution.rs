@@ -711,7 +711,10 @@ impl OrderExecutor {
                 for item in arr {
                     let success = item["success"].as_bool().unwrap_or(false);
                     if success {
-                        if let Some(order_id) = item["orderID"].as_str() {
+                        let order_id_opt = item["orderID"].as_str()
+                            .or_else(|| item["orderId"].as_str())
+                            .filter(|s| !s.is_empty());
+                        if let Some(order_id) = order_id_opt {
                             // Extract actual fill amounts from response
                             // For BUY FAK: takingAmount = tokens received, makingAmount = USDC paid
                             // These are in raw 6-decimal string format (e.g. "50000000" = 50 tokens)
@@ -760,6 +763,16 @@ impl OrderExecutor {
     /// Get a reference to the order signer for direct batch signing.
     pub fn signer(&self) -> &OrderSigner {
         &self.signer
+    }
+
+    /// REST base URL for constructing order status poll URLs.
+    pub fn rest_url(&self) -> &str {
+        &self.config.polymarket.rest_url
+    }
+
+    /// Shared HTTP client for fill polling requests.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Get signature cache statistics (hits, misses, size) for metrics reporting

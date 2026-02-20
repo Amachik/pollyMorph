@@ -957,6 +957,9 @@ async fn submit_sweep_orders(
     let mut cost_total = 0.0_f64;
     let side_label = match swept_side { SweptSide::Up => "Up", SweptSide::Down => "Down" };
 
+    // Collect (order_id, req_size, req_price, batch_index) for matched orders to poll
+    let mut matched_order_ids: Vec<(String, f64, f64)> = Vec::new();
+
     for (batch_idx, chunk) in signed_ok.chunks(BATCH_LIMIT).enumerate() {
         if batch_idx > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -969,21 +972,70 @@ async fn submit_sweep_orders(
             let req_price = chunk[k].price.to_f64().unwrap_or(0.0);
             match result {
                 Ok(fill) => {
-                    let actual_tokens = fill.tokens_filled();
-                    let actual_cost = fill.usdc_amount();
-                    let is_delayed = fill.status == "DELAYED";
-                    let tokens = if actual_tokens > 0.0 { actual_tokens }
-                                 else if is_delayed { req_size } else { 0.0 };
-                    let cost = if actual_cost > 0.0 { actual_cost }
-                               else if is_delayed { req_size * req_price } else { 0.0 };
                     orders_ok += 1;
-                    tokens_total += tokens;
-                    cost_total += cost;
-                    info!("   ✅ {} #{}: {:.1} tokens @ {:.3} → {} [{}]",
-                          side_label, k + 1, tokens, req_price, fill.order_id, fill.status);
+                    // Polymarket batch POST always returns takingAmount=0 for FAK orders.
+                    // Queue matched orders for a follow-up GET /order/{id} poll.
+                    if !fill.order_id.is_empty() {
+                        info!("   📬 {} #{}: queued for fill poll → {} [{}]",
+                              side_label, k + 1, fill.order_id, fill.status);
+                        matched_order_ids.push((fill.order_id.clone(), req_size, req_price));
+                    } else {
+                        warn!("   ⚠️  {} #{}: accepted but no order_id returned @ {:.3}",
+                              side_label, k + 1, req_price);
+                    }
                 }
                 Err(ref e) => {
                     warn!("   ❌ {} #{} failed: {}", side_label, k + 1, e);
+                }
+            }
+        }
+    }
+
+    // Poll GET /order/{orderId} for each matched order to get actual fill amounts.
+    // Polymarket typically settles FAK fills within ~500ms.
+    if !matched_order_ids.is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let rest_url = executor.rest_url();
+        let http = executor.http_client();
+        for (order_id, req_size, req_price) in &matched_order_ids {
+            let url = format!("{}/order/{}", rest_url, order_id);
+            match http.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(v) => {
+                            // GET /order response: sizeFilled (decimal string, human-readable tokens)
+                            // and price (decimal string)
+                            let size_filled = v["sizeFilled"].as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let price_used = v["price"].as_str()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .unwrap_or(*req_price);
+                            let status = v["status"].as_str().unwrap_or("UNKNOWN");
+                            let cost = size_filled * price_used;
+                            tokens_total += size_filled;
+                            cost_total += cost;
+                            info!("   ✅ {} fill: {:.1} tokens @ {:.3} = ${:.2} [{}] ({})",
+                                  side_label, size_filled, price_used, cost, status, order_id);
+                        }
+                        Err(e) => {
+                            warn!("   ⚠️  fill poll parse error for {}: {} — using req size {:.1}",
+                                  order_id, e, req_size);
+                            tokens_total += req_size;
+                            cost_total += req_size * req_price;
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    warn!("   ⚠️  fill poll {} returned {}", order_id, resp.status());
+                    tokens_total += req_size;
+                    cost_total += req_size * req_price;
+                }
+                Err(e) => {
+                    warn!("   ⚠️  fill poll network error for {}: {} — using req size {:.1}",
+                          order_id, e, req_size);
+                    tokens_total += req_size;
+                    cost_total += req_size * req_price;
                 }
             }
         }

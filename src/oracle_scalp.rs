@@ -30,9 +30,9 @@ use tracing::{info, warn, error, debug};
 
 const ENTRY_WINDOW_SECS: i64 = 60;   // Only enter in final 60s — outcome much more certain
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_PRICE: f64 = 0.90; // Require strong conviction: winning side >= 90¢
-const MAX_LOSING_PRICE: f64 = 0.15;  // Losing side must be cheap — confirms clear outcome
-const MAX_SWEEP_PRICE: f64 = 0.85;  // 10% taker fee -> net cost 0.935, min profit $0.065/token
+const MIN_WINNING_PRICE: f64 = 0.75; // Winning side must be >= 75¢ to signal
+const MAX_LOSING_PRICE: f64 = 0.20;  // Losing side must be <= 20¢ to confirm clear outcome
+const MAX_SWEEP_PRICE: f64 = 0.85;  // 10% taker fee -> net cost 0.935, profit $0.065/token (7% ROI)
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 5.0;

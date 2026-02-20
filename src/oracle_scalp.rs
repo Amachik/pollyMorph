@@ -31,8 +31,8 @@ use tracing::{info, warn, error, debug};
 
 const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profitable wallet timing
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_BID: f64 = 0.50;   // Winning side best_bid >= 50¢ — slight lean is enough
-const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — just need separation
+const MIN_WINNING_BID: f64 = 0.55;   // Winning side best_bid >= 55¢ — clear lean
+const MAX_LOSING_BID: f64 = 0.50;    // Losing side best_bid <= 50¢ — allow tight markets
 const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee = 10% * 2 * min(p,1-p) → 0.6% at 0.97 → profit $0.024/token
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
@@ -264,7 +264,7 @@ impl OracleEngine {
     pub async fn run(&mut self) {
         info!("🎯 ORACLE ENGINE STARTED — Capital: ${:.2}", self.capital_usdc);
         info!("   Strategy: Sweep winning side in final {}s of 15m markets", ENTRY_WINDOW_SECS);
-        info!("   Max bet: ${:.0} | Min winning bid: {:.2} | Max sweep: {:.2}", MAX_BET_USDC, MIN_WINNING_BID, MAX_SWEEP_PRICE);
+        info!("   Max bet: ${:.0} | Win bid >= {:.2} | Lose bid <= {:.2} | Sweep <= {:.2}", MAX_BET_USDC, MIN_WINNING_BID, MAX_LOSING_BID, MAX_SWEEP_PRICE);
 
         if !self.ws_subscribed.is_empty() {
             let ids: Vec<String> = self.ws_subscribed.iter().cloned().collect();
@@ -319,10 +319,36 @@ impl OracleEngine {
                 }
                 _ = status_interval.tick() => {
                     let deployed: f64 = self.positions.iter().map(|p| p.cost_usdc).sum();
-                    info!("📊 ORACLE: {} positions (${:.2} deployed) | ${:.2} avail | P&L: ${:.2} | Sweeps: {} | WS: {}",
+                    let now_ts = chrono::Utc::now().timestamp();
+                    let cached_assets = self.book_cache.len();
+                    let tracked = self.tracked_markets.len();
+                    // Count markets in entry window and their book data status
+                    let mut in_window = 0u32;
+                    let mut has_both_books = 0u32;
+                    for m in self.tracked_markets.values() {
+                        let secs_left = m.event_end_ts - now_ts;
+                        if secs_left > 0 && secs_left <= ENTRY_WINDOW_SECS {
+                            in_window += 1;
+                            let has_up = self.book_cache.contains_key(&m.up_token_id);
+                            let has_down = self.book_cache.contains_key(&m.down_token_id);
+                            if has_up && has_down {
+                                has_both_books += 1;
+                                let up_b = self.book_cache.get(&m.up_token_id).unwrap();
+                                let dn_b = self.book_cache.get(&m.down_token_id).unwrap();
+                                debug!("📖 {} ({:.0}s left): UpBid={:.3} DownBid={:.3} asks={}+{}",
+                                       m.title, secs_left, up_b.best_bid, dn_b.best_bid,
+                                       up_b.ask_levels.len(), dn_b.ask_levels.len());
+                            } else {
+                                debug!("📖 {} ({:.0}s left): up_book={} down_book={}",
+                                       m.title, secs_left, has_up, has_down);
+                            }
+                        }
+                    }
+                    info!("📊 ORACLE: {} pos (${:.2}) | ${:.2} avail | P&L: ${:.2} | Sweeps: {} | WS: {} | tracked: {} | cached: {} | in_window: {}/{} have books",
                           self.positions.len(), deployed, self.capital_usdc,
                           self.total_pnl, self.sweeps_completed,
-                          if self.ws_connected { "✅" } else { "❌" });
+                          if self.ws_connected { "✅" } else { "❌" },
+                          tracked, cached_assets, has_both_books, in_window);
                 }
             }
         }

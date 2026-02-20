@@ -3450,7 +3450,11 @@ async fn dispatch_single_ws_message(
                     trace!("📊 price_change: {}... bid={:.2} ask={:.2}",
                            &asset_id[..16.min(asset_id.len())], best_bid, best_ask);
 
-                    if best_ask > 0.0 && best_ask < 1.0 {
+                    // Allow all valid price updates through — including best_ask=1.0
+                    // which is common for the losing side of binary markets.
+                    // Previously filtered best_ask >= 1.0, which starved the oracle
+                    // engine of losing-side book data.
+                    if best_bid >= 0.0 && best_ask > 0.0 {
                         let _ = event_tx.send(ArbWsEvent::PriceUpdate {
                             asset_id: asset_id.clone(),
                             best_bid,

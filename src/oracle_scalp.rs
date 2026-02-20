@@ -425,6 +425,12 @@ impl OracleEngine {
                 return;
             };
 
+        // Early capital check — avoid log spam when capital is exhausted
+        let available = self.capital_usdc.min(MAX_BET_USDC);
+        if available < MIN_ORDER_SIZE {
+            return; // silently skip — no point logging hundreds of times
+        }
+
         let (total_tokens, total_cost) = self.compute_sweep(&winning_book);
         if total_tokens < MIN_ORDER_SIZE || total_cost < 1.0 { return; }
 
@@ -1073,10 +1079,8 @@ async fn submit_sweep_orders(
     // FAK orders typically settle within 1-2s; retry up to 3 times with 1s gaps.
     if !matched_order_ids.is_empty() {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let rest_url = executor.rest_url();
-        let http = executor.http_client();
         for (order_id, req_size, req_price) in &matched_order_ids {
-            let url = format!("{}/data/order/{}", rest_url, order_id);
+            let path = format!("/data/order/{}", order_id);
             let mut size_filled = 0.0_f64;
             let mut price_used = *req_price;
             let mut poll_ok = false;
@@ -1084,7 +1088,7 @@ async fn submit_sweep_orders(
                 if attempt > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                 }
-                match http.get(&url).send().await {
+                match executor.authenticated_get(&path).await {
                     Ok(resp) if resp.status().is_success() => {
                         match resp.json::<serde_json::Value>().await {
                             Ok(v) => {

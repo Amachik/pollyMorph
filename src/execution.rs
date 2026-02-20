@@ -775,6 +775,17 @@ impl OrderExecutor {
         &self.client
     }
 
+    /// Authenticated GET request to the CLOB API (includes L2 HMAC headers).
+    pub async fn authenticated_get(&self, path: &str) -> Result<reqwest::Response, ExecutionError> {
+        let url = format!("{}{}", self.config.polymarket.rest_url, path);
+        let headers = self.l2_headers("GET", path, "")?;
+        let mut req = self.client.get(&url);
+        for (k, v) in &headers {
+            req = req.header(k, v);
+        }
+        req.send().await.map_err(|e| ExecutionError::NetworkError(e.to_string()))
+    }
+
     /// Get signature cache statistics (hits, misses, size) for metrics reporting
     pub fn signer_cache_stats(&self) -> (u64, u64, usize) {
         self.signer.cache_stats()

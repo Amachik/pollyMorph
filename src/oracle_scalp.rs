@@ -70,6 +70,8 @@ struct OraclePosition {
     cost_usdc: f64,
     entered_at: chrono::DateTime<chrono::Utc>,
     redeemed: bool,
+    #[serde(default)]
+    redeem_attempts: u32,
 }
 
 #[derive(Debug)]
@@ -744,6 +746,22 @@ impl OracleEngine {
         self.executing_slugs.remove(&result.event_slug);
         if let Some(ref err) = result.error {
             warn!("❌ Redeem failed for {}: {}", result.event_slug, err);
+            // Increment attempt counter. After 3 failures give up and drop the
+            // position so check_and_redeem stops retrying indefinitely.
+            let mut gave_up = false;
+            for pos in self.positions.iter_mut() {
+                if pos.market.event_slug == result.event_slug && !pos.redeemed {
+                    pos.redeem_attempts += 1;
+                    if pos.redeem_attempts >= 3 {
+                        pos.redeemed = true; // stop retrying
+                        gave_up = true;
+                        error!("🚫 Giving up on redeem for {} after 3 failures — manual claim required",
+                               result.event_slug);
+                    }
+                    break;
+                }
+            }
+            if gave_up { save_positions(&self.positions); }
             return;
         }
         self.capital_usdc += result.usdc_recovered;
@@ -1488,10 +1506,13 @@ async fn run_background_redeem(
 
     // --- Fetch relay payload (nonce + relay address) ---
     let http_client = reqwest::Client::new();
+    // The relayer expects the PROXY wallet address here, not the EOA.
+    // Passing the EOA or an unknown 'type' param causes {"error":"bad request"}.
+    let proxy_address = config.polymarket.proxy_address.to_lowercase();
     let relay_payload: serde_json::Value = match async {
         let r = http_client
             .get(format!("{}/relay-payload", relayer_url))
-            .query(&[("address", eoa.as_str()), ("type", "proxy")])
+            .query(&[("address", proxy_address.as_str())])
             .send().await?;
         r.json::<serde_json::Value>().await
     }.await

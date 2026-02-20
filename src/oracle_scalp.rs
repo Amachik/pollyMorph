@@ -1244,17 +1244,25 @@ async fn submit_sweep_orders(
                                 let matched = v["size_matched"].as_str()
                                     .and_then(|s| s.parse::<f64>().ok())
                                     .unwrap_or(0.0);
+                                let original = v["original_size"].as_str()
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0);
                                 let p = v["price"].as_str()
                                     .and_then(|s| s.parse::<f64>().ok())
                                     .unwrap_or(*req_price);
                                 let status = v["status"].as_str().unwrap_or("UNKNOWN");
+                                // Log raw fields for debugging size_matched inflation
+                                info!("   📋 fill poll raw: original_size={:.4} size_matched={:.4} price={:.4} status={} req_size={:.4}",
+                                      original, matched, p, status, req_size);
                                 // Retry if still MATCHED/OPEN and size_matched=0
                                 if matched == 0.0 && attempt < 2 {
                                     debug!("   ⏳ fill poll attempt {}: {} status={} size_matched=0 — retrying",
                                            attempt + 1, order_id, status);
                                     continue;
                                 }
-                                size_filled = matched;
+                                // Cap fill at original_size to avoid inflated size_matched
+                                // in neg-risk markets where the CLOB may report complementary tokens
+                                size_filled = if original > 0.0 { matched.min(original) } else { matched };
                                 price_used = p;
                                 poll_ok = true;
                                 info!("   ✅ {} fill: {:.4} tokens @ {:.4} = ${:.4} [{}] ({})",

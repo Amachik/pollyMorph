@@ -1514,13 +1514,13 @@ async fn run_background_redeem(
 
     // --- Fetch relay payload (nonce + relay address) ---
     let http_client = reqwest::Client::new();
-    // The relayer expects the PROXY wallet address here, not the EOA.
-    // Passing the EOA or an unknown 'type' param causes {"error":"bad request"}.
+    // The relayer expects the PROXY wallet address + type "PROXY" (uppercase).
+    // SDK reference: relayClient.getRelayPayload(from, "PROXY")
     let proxy_address = config.polymarket.proxy_address.to_lowercase();
     let relay_payload: serde_json::Value = match async {
         let r = http_client
             .get(format!("{}/relay-payload", relayer_url))
-            .query(&[("address", proxy_address.as_str())])
+            .query(&[("address", proxy_address.as_str()), ("type", "PROXY")])
             .send().await?;
         r.json::<serde_json::Value>().await
     }.await

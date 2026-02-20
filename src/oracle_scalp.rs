@@ -425,10 +425,7 @@ impl OracleEngine {
                 return;
             };
 
-        let sweep_orders = self.compute_sweep(&winning_book);
-        if sweep_orders.is_empty() { return; }
-        let total_tokens: f64 = sweep_orders.iter().map(|o| o.size).sum();
-        let total_cost: f64 = sweep_orders.iter().map(|o| o.price * o.size).sum();
+        let (total_tokens, total_cost) = self.compute_sweep(&winning_book);
         if total_tokens < MIN_ORDER_SIZE || total_cost < 1.0 { return; }
 
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
@@ -437,33 +434,34 @@ impl OracleEngine {
               market.title, side_label, winning_book.best_ask, total_tokens, total_cost, secs_remaining, mom_str);
 
         self.executing_slugs.insert(market.event_slug.clone());
-        self.execute_sweep(&market, winning_side, sweep_orders, total_cost);
+        self.execute_sweep(&market, winning_side, total_tokens, total_cost);
     }
 
-    /// Compute sweep orders from a book, capped by capital limits.
-    /// Takes ALL ask levels up to MAX_BET_USDC / available capital.
-    fn compute_sweep(&self, book: &TokenBook) -> Vec<BookLevel> {
-        if book.ask_levels.is_empty() { return Vec::new(); }
+    /// Compute total tokens available on the ask book up to MAX_SWEEP_PRICE,
+    /// capped by capital limits. Returns (total_tokens, estimated_cost).
+    fn compute_sweep(&self, book: &TokenBook) -> (f64, f64) {
+        if book.ask_levels.is_empty() { return (0.0, 0.0); }
         let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION);
-        let mut orders = Vec::new();
-        let mut remaining = max_usdc;
+        let mut tokens = 0.0_f64;
+        let mut cost = 0.0_f64;
         for level in &book.ask_levels {
             if level.price > MAX_SWEEP_PRICE { break; }
+            let remaining = max_usdc - cost;
             if remaining < MIN_ORDER_SIZE * level.price { break; }
-            let tokens = level.size.min(remaining / level.price);
-            if tokens < MIN_ORDER_SIZE { break; }
-            orders.push(BookLevel { price: level.price, size: tokens });
-            remaining -= tokens * level.price;
+            let t = level.size.min(remaining / level.price);
+            if t < MIN_ORDER_SIZE && tokens == 0.0 { break; }
+            tokens += t;
+            cost += t * level.price;
         }
-        orders
+        (tokens, cost)
     }
 
     fn execute_sweep(
         &mut self,
         market: &ArbMarket,
         swept_side: SweptSide,
-        orders: Vec<BookLevel>,
-        estimated_cost: f64,
+        total_tokens: f64,
+        _estimated_cost: f64,
     ) {
         let available = self.capital_usdc.min(MAX_BET_USDC);
         if available < MIN_ORDER_SIZE {
@@ -471,7 +469,6 @@ impl OracleEngine {
             self.executing_slugs.remove(&market.event_slug);
             return;
         }
-        let scale = if estimated_cost > available { available / estimated_cost } else { 1.0 };
 
         let token_id = match swept_side {
             SweptSide::Up => market.up_token_id.clone(),
@@ -481,37 +478,35 @@ impl OracleEngine {
         let market_id = MarketId { token_id: token_hash, condition_id: [0u8; 32] };
         let neg_risk = market.neg_risk;
 
-        let mut signals: Vec<TradeSignal> = Vec::new();
-        let mut actual_cost = 0.0_f64;
-        for level in &orders {
-            let sz = level.size * scale;
-            if sz < MIN_ORDER_SIZE { continue; }
-            actual_cost += sz * level.price;
-            // Round price to 2dp and size to 4dp before Decimal conversion.
-            // from_f64_retain preserves ALL f64 digits (e.g. 0.52 → 0.52000000000000002)
-            // which causes Polymarket to reject with "invalid amounts".
-            let price_rounded = (level.price * 100.0).round() / 100.0;
-            let sz_rounded = (sz * 10000.0).round() / 10000.0;
-            signals.push(TradeSignal {
-                market_id,
-                side: Side::Buy,
-                price: Decimal::from_f64_retain(price_rounded).unwrap_or(Decimal::new(50, 2)),
-                size: Decimal::from_f64_retain(sz_rounded).unwrap_or(Decimal::new(5, 0)),
-                order_type: OrderType::ImmediateOrCancel,
-                urgency: SignalUrgency::Critical,
-                expected_profit_bps: 500,
-                signal_timestamp_ns: 0,
-            });
-        }
-        if signals.is_empty() {
+        // Send ONE FAK order at MAX_SWEEP_PRICE for the full token amount.
+        // The CLOB will fill against all available asks up to this price.
+        // Per-level orders fail because the book moves between WS snapshot and order arrival.
+        let sz_rounded = (total_tokens * 10000.0).round() / 10000.0;
+        let actual_cost = sz_rounded * MAX_SWEEP_PRICE; // worst-case cost reservation
+        let actual_cost = actual_cost.min(available * MAX_CAPITAL_FRACTION);
+        let sz_capped = actual_cost / MAX_SWEEP_PRICE;
+        let sz_final = (sz_capped * 10000.0).round() / 10000.0;
+        if sz_final < MIN_ORDER_SIZE {
             self.executing_slugs.remove(&market.event_slug);
             return;
         }
 
-        self.capital_usdc -= actual_cost;
+        let signals = vec![TradeSignal {
+            market_id,
+            side: Side::Buy,
+            price: Decimal::from_f64_retain(MAX_SWEEP_PRICE).unwrap_or(Decimal::new(97, 2)),
+            size: Decimal::from_f64_retain(sz_final).unwrap_or(Decimal::new(5, 0)),
+            order_type: OrderType::ImmediateOrCancel,
+            urgency: SignalUrgency::Critical,
+            expected_profit_bps: 500,
+            signal_timestamp_ns: 0,
+        }];
+
+        let reserved = sz_final * MAX_SWEEP_PRICE;
+        self.capital_usdc -= reserved;
         let side_label = match swept_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
-        info!("🚀 SWEEPING {} {} orders on {} (${:.2} reserved)",
-              signals.len(), side_label, market.title, actual_cost);
+        info!("🚀 SWEEP {} @ {:.2} | {:.0} tokens | ${:.2} reserved | {}",
+              side_label, MAX_SWEEP_PRICE, sz_final, reserved, market.title);
 
         let sweep_tx = self.sweep_tx.clone();
         let executor = self.executor.clone();
@@ -521,7 +516,7 @@ impl OracleEngine {
             let result = std::panic::AssertUnwindSafe(
                 submit_sweep_orders(
                     executor, signals, token_id, neg_risk,
-                    market_clone.clone(), swept_side, event_slug.clone(), actual_cost,
+                    market_clone.clone(), swept_side, event_slug.clone(), reserved,
                 )
             ).catch_unwind().await.unwrap_or_else(|_| {
                 error!("💥 PANIC in submit_sweep_orders for {}", event_slug);
@@ -529,7 +524,7 @@ impl OracleEngine {
                     event_slug: event_slug.clone(),
                     market: market_clone,
                     swept_side,
-                    estimated_cost: actual_cost,
+                    estimated_cost: reserved,
                     tokens_total: 0.0,
                     cost_total: 0.0,
                     orders_ok: 0,

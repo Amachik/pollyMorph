@@ -348,6 +348,7 @@ impl OracleEngine {
                     self.reconcile_positions().await;
                     self.check_and_redeem().await;
                     self.discover_and_subscribe().await;
+                    self.poll_books_and_check_signals().await;
                 }
                 _ = status_interval.tick() => {
                     let deployed: f64 = self.positions.iter().map(|p| p.cost_usdc).sum();
@@ -409,6 +410,86 @@ impl OracleEngine {
             });
         }
         self.check_entry_signal(asset_id).await;
+    }
+
+    /// Fetch order book from CLOB REST API for a single token.
+    /// Fallback for when WS doesn't deliver book snapshots.
+    async fn fetch_rest_book(&self, token_id: &str) -> Option<TokenBook> {
+        let url = format!("{}/book?token_id={}", self.config.polymarket.rest_url, token_id);
+        let resp = self.client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() { return None; }
+        let body: serde_json::Value = resp.json().await.ok()?;
+
+        let mut ask_levels = Vec::new();
+        if let Some(asks) = body.get("asks").and_then(|v| v.as_array()) {
+            for ask in asks {
+                let price = ask.get("price").and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0);
+                let size = ask.get("size").and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                if size > 0.0 {
+                    ask_levels.push(BookLevel { price, size });
+                }
+            }
+        }
+        ask_levels.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+
+        let best_ask = ask_levels.first().map(|l| l.price).unwrap_or(1.0);
+        let total_ask_depth: f64 = ask_levels.iter().map(|l| l.size).sum();
+
+        let best_bid = if let Some(bids) = body.get("bids").and_then(|v| v.as_array()) {
+            bids.iter()
+                .filter_map(|b| b.get("price").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+                .fold(0.0_f64, f64::max)
+        } else { 0.0 };
+
+        if ask_levels.is_empty() && best_bid == 0.0 { return None; }
+
+        Some(TokenBook { best_bid, best_ask, ask_levels, total_ask_depth, updated_at: std::time::Instant::now() })
+    }
+
+    /// Poll REST books for markets in entry window that are missing WS book data,
+    /// then run signal checks on all markets with complete book data.
+    async fn poll_books_and_check_signals(&mut self) {
+        let now_ts = chrono::Utc::now().timestamp();
+        // Collect markets in or approaching entry window that need book data
+        let markets_needing_books: Vec<ArbMarket> = self.tracked_markets.values()
+            .filter(|m| {
+                let secs_left = m.event_end_ts - now_ts;
+                // Poll books for markets within 3 minutes of end (wider than entry window)
+                secs_left > 0 && secs_left <= ENTRY_WINDOW_SECS + 60
+            })
+            .cloned()
+            .collect();
+
+        // Fetch missing books via REST
+        for m in &markets_needing_books {
+            let needs_up = !self.book_cache.contains_key(&m.up_token_id)
+                || self.book_cache.get(&m.up_token_id).map_or(true, |b| b.updated_at.elapsed().as_secs() > 30);
+            let needs_down = !self.book_cache.contains_key(&m.down_token_id)
+                || self.book_cache.get(&m.down_token_id).map_or(true, |b| b.updated_at.elapsed().as_secs() > 30);
+
+            if needs_up {
+                if let Some(book) = self.fetch_rest_book(&m.up_token_id).await {
+                    debug!("📡 REST book: {} UP bid={:.3} asks={}", m.title, book.best_bid, book.ask_levels.len());
+                    self.book_cache.insert(m.up_token_id.clone(), book);
+                }
+            }
+            if needs_down {
+                if let Some(book) = self.fetch_rest_book(&m.down_token_id).await {
+                    debug!("📡 REST book: {} DOWN bid={:.3} asks={}", m.title, book.best_bid, book.ask_levels.len());
+                    self.book_cache.insert(m.down_token_id.clone(), book);
+                }
+            }
+        }
+
+        // Run signal check on all markets with both books in entry window
+        let asset_ids: Vec<String> = markets_needing_books.iter()
+            .flat_map(|m| vec![m.up_token_id.clone(), m.down_token_id.clone()])
+            .collect();
+        for asset_id in asset_ids {
+            self.check_entry_signal(asset_id).await;
+        }
     }
 
     /// Core signal check — called on every book update.

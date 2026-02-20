@@ -481,11 +481,16 @@ impl OracleEngine {
             let sz = level.size * scale;
             if sz < MIN_ORDER_SIZE { continue; }
             actual_cost += sz * level.price;
+            // Round price to 2dp and size to 4dp before Decimal conversion.
+            // from_f64_retain preserves ALL f64 digits (e.g. 0.52 → 0.52000000000000002)
+            // which causes Polymarket to reject with "invalid amounts".
+            let price_rounded = (level.price * 100.0).round() / 100.0;
+            let sz_rounded = (sz * 10000.0).round() / 10000.0;
             signals.push(TradeSignal {
                 market_id,
                 side: Side::Buy,
-                price: Decimal::from_f64_retain(level.price).unwrap_or(Decimal::new(50, 2)),
-                size: Decimal::from_f64_retain(sz).unwrap_or(Decimal::new(5, 0)),
+                price: Decimal::from_f64_retain(price_rounded).unwrap_or(Decimal::new(50, 2)),
+                size: Decimal::from_f64_retain(sz_rounded).unwrap_or(Decimal::new(5, 0)),
                 order_type: OrderType::ImmediateOrCancel,
                 urgency: SignalUrgency::Critical,
                 expected_profit_bps: 500,

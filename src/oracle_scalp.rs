@@ -631,7 +631,6 @@ impl OracleEngine {
         if available < MIN_ORDER_SIZE {
             warn!("Insufficient capital: ${:.2}", self.capital_usdc);
             self.executing_slugs.remove(&market.event_slug);
-            self.failed_slugs.insert(market.event_slug.clone());
             return;
         }
 
@@ -653,7 +652,6 @@ impl OracleEngine {
         let sz_final = (sz_capped * 10000.0).round() / 10000.0;
         if sz_final < MIN_ORDER_SIZE {
             self.executing_slugs.remove(&market.event_slug);
-            self.failed_slugs.insert(market.event_slug.clone());
             return;
         }
 
@@ -728,6 +726,7 @@ impl OracleEngine {
                 cost_usdc: result.cost_total,
                 entered_at: chrono::Utc::now(),
                 redeemed: false,
+                redeem_attempts: 0,
             });
             save_positions(&self.positions);
         } else {

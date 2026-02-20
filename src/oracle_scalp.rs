@@ -483,11 +483,18 @@ impl OracleEngine {
             }
         }
 
-        // Run signal check on all markets with both books in entry window
-        let asset_ids: Vec<String> = markets_needing_books.iter()
-            .flat_map(|m| vec![m.up_token_id.clone(), m.down_token_id.clone()])
+        // Run signal check on all markets in entry window (use up_token_id only — 
+        // check_entry_signal looks up the market from either token and evaluates both sides)
+        let check_ids: Vec<String> = markets_needing_books.iter()
+            .filter(|m| {
+                let secs_left = m.event_end_ts - now_ts;
+                secs_left > 0 && secs_left <= ENTRY_WINDOW_SECS
+            })
+            .map(|m| m.up_token_id.clone())
             .collect();
-        for asset_id in asset_ids {
+        for asset_id in check_ids {
+            // Bypass the 2s WS-burst cooldown for the periodic scan
+            self.last_signal_fired = std::time::Instant::now() - std::time::Duration::from_secs(10);
             self.check_entry_signal(asset_id).await;
         }
     }

@@ -431,16 +431,22 @@ impl OrderSigner {
     /// `price` is the probability price (e.g. 0.55).
     #[inline(always)]
     fn calculate_amounts(&self, side: Side, price: Decimal, size: Decimal) -> (U256, U256) {
-        let size_tokens = Self::to_token_decimals(size);
-        let notional = Self::to_token_decimals(size * price);
+        // Polymarket precision rules:
+        //   makerAmount (USDC): max 2 decimal places (nearest cent) → round to 2dp before scaling
+        //   takerAmount (tokens): max 4 decimal places → round to 4dp before scaling
+        let size_4dp = size.round_dp(4);
+        let notional_2dp = (size * price).round_dp(2);
+
+        let size_tokens = Self::to_token_decimals(size_4dp);
+        let notional = Self::to_token_decimals(notional_2dp);
 
         match side {
             Side::Buy => {
-                // BUY: pay USDC (maker), receive conditional tokens (taker)
+                // BUY: pay USDC (maker=2dp), receive conditional tokens (taker=4dp)
                 (U256::from(notional), U256::from(size_tokens))
             }
             Side::Sell => {
-                // SELL: pay conditional tokens (maker), receive USDC (taker)
+                // SELL: pay conditional tokens (maker=4dp), receive USDC (taker=2dp)
                 (U256::from(size_tokens), U256::from(notional))
             }
         }

@@ -999,7 +999,7 @@ async fn submit_sweep_orders(
         let rest_url = executor.rest_url();
         let http = executor.http_client();
         for (order_id, req_size, req_price) in &matched_order_ids {
-            let url = format!("{}/order/{}", rest_url, order_id);
+            let url = format!("{}/data/order/{}", rest_url, order_id);
             match http.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<serde_json::Value>().await {

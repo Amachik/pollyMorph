@@ -31,9 +31,10 @@ use tracing::{info, warn, error, debug};
 
 const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profitable wallet timing
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_BID: f64 = 0.55;   // Winning side best_bid >= 55¢ — clear lean
-const MAX_LOSING_BID: f64 = 0.50;    // Losing side best_bid <= 50¢ — allow tight markets
+const MIN_WINNING_BID: f64 = 0.45;   // Winning side best_bid >= 45¢ — enter early like RetamzZ
+const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — complementary threshold
 const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee = 10% * 2 * min(p,1-p) → 0.6% at 0.97 → profit $0.024/token
+const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 1.0;   // CLOB minimum ~1 token; sizing is dynamic based on balance
@@ -141,7 +142,9 @@ pub struct OracleEngine {
     ws_subscribed: HashSet<String>,
     ws_connected: bool,
     executing_slugs: HashSet<String>,
-    failed_slugs: HashSet<String>,
+    /// Per-market last sweep attempt time — replaces permanent failed_slugs block.
+    /// After RESWEEP_COOLDOWN_MS the market is eligible for another sweep.
+    last_sweep_attempt: HashMap<String, std::time::Instant>,
     last_debug_log: HashMap<String, std::time::Instant>,
     sweep_rx: mpsc::Receiver<SweepResult>,
     sweep_tx: mpsc::Sender<SweepResult>,
@@ -225,7 +228,7 @@ impl OracleEngine {
             tracked_markets, asset_to_market, ws_subscribed,
             ws_connected: false,
             executing_slugs: HashSet::new(),
-            failed_slugs: HashSet::new(),
+            last_sweep_attempt: HashMap::new(),
             last_debug_log: HashMap::new(),
             sweep_rx, sweep_tx, redeem_rx, redeem_tx,
             event_detail_cache: HashMap::new(),
@@ -514,17 +517,14 @@ impl OracleEngine {
             None => return,
         };
         if self.executing_slugs.contains(&market.event_slug) { return; }
-        if self.failed_slugs.contains(&market.event_slug) { return; }
         // Block new sweeps while ANY sweep is in-flight — on-chain balance is shared
         if !self.executing_slugs.is_empty() { return; }
-        // Cooldown: don't re-evaluate signals within 2s of the last attempt
-        if self.last_signal_fired.elapsed().as_millis() < 2000 { return; }
-        // Allow scaling into a position if price has moved further in our favor.
-        // Only block if we already hold >= 90% of max capital in this market.
-        if let Some(pos) = self.positions.iter().find(|p| p.market.event_slug == market.event_slug && !p.redeemed) {
-            let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION);
-            if pos.cost_usdc >= max_usdc * 0.90 { return; } // already fully sized
+        // Per-market cooldown: allow re-sweep after RESWEEP_COOLDOWN_MS (not a permanent block)
+        if let Some(last) = self.last_sweep_attempt.get(&market.event_slug) {
+            if last.elapsed().as_millis() < RESWEEP_COOLDOWN_MS { return; }
         }
+        // Global cooldown: don't re-evaluate signals within 2s of the last attempt
+        if self.last_signal_fired.elapsed().as_millis() < 2000 { return; }
 
         let now = chrono::Utc::now().timestamp();
         let secs_remaining = market.event_end_ts - now;
@@ -588,6 +588,7 @@ impl OracleEngine {
 
         // Insert slug FIRST to block all subsequent WS-triggered evaluations
         self.executing_slugs.insert(market.event_slug.clone());
+        self.last_sweep_attempt.insert(market.event_slug.clone(), std::time::Instant::now());
         self.last_signal_fired = std::time::Instant::now();
 
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
@@ -735,8 +736,7 @@ impl OracleEngine {
             // Full refund — nothing was actually spent (if balance refresh shows
             // otherwise, it will correct capital_usdc)
             self.capital_usdc += result.estimated_cost;
-            error!("❌ ALL SWEEP ORDERS FAILED for {} — marking as no-retry", result.event_slug);
-            self.failed_slugs.insert(result.event_slug.clone());
+            warn!("⚠️  All sweep orders failed for {} — will retry after cooldown", result.event_slug);
         }
     }
 
@@ -1049,7 +1049,7 @@ impl OracleEngine {
                 let _ = self.ws_cmd_tx.send(WsCommand::Unsubscribe(ids)).await;
                 debug!("🗑️  Dropped expired market: {}", slug);
             }
-            self.failed_slugs.remove(slug);
+            self.last_sweep_attempt.remove(slug);
             self.executing_slugs.remove(slug);
         }
     }

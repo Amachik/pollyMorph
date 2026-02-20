@@ -33,7 +33,7 @@ const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profita
 const MIN_SECS_REMAINING: i64 = 10;
 const MIN_WINNING_BID: f64 = 0.45;   // Winning side best_bid >= 45¢ — enter early like RetamzZ
 const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — complementary threshold
-const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee = 10% * 2 * min(p,1-p) → 0.6% at 0.97 → profit $0.024/token
+const MAX_SWEEP_PRICE: f64 = 0.999;  // Hard cap — buying at 0.999 still nets $0.001/token after fees at resolution
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
@@ -585,7 +585,7 @@ impl OracleEngine {
             return; // silently skip — no point logging hundreds of times
         }
 
-        let (total_tokens, total_cost) = self.compute_sweep(&winning_book);
+        let (total_tokens, total_cost, sweep_price) = self.compute_sweep(&winning_book);
         if total_tokens < MIN_ORDER_SIZE || total_cost < 0.50 { return; }
 
         // Insert slug FIRST to block all subsequent WS-triggered evaluations
@@ -595,19 +595,21 @@ impl OracleEngine {
 
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
         let mom_str = momentum.map_or("n/a".to_string(), |m| format!("{:+.3}%", m));
-        info!("🎯 ORACLE SIGNAL: {} | {} @ {:.3} | {:.0} tokens | ${:.2} cost | {:.0}s left | spot {}",
-              market.title, side_label, winning_book.best_ask, total_tokens, total_cost, secs_remaining, mom_str);
+        info!("🎯 ORACLE SIGNAL: {} | {} @ {:.3} (sweep≤{:.3}) | {:.0} tokens | ${:.2} cost | {:.0}s left | spot {}",
+              market.title, side_label, winning_book.best_ask, sweep_price, total_tokens, total_cost, secs_remaining, mom_str);
 
-        self.execute_sweep(&market, winning_side, total_tokens, total_cost);
+        self.execute_sweep(&market, winning_side, total_tokens, total_cost, sweep_price);
     }
 
-    /// Compute total tokens available on the ask book up to MAX_SWEEP_PRICE,
-    /// capped by capital limits. Returns (total_tokens, estimated_cost).
-    fn compute_sweep(&self, book: &TokenBook) -> (f64, f64) {
-        if book.ask_levels.is_empty() { return (0.0, 0.0); }
+    /// Compute total tokens available on the ask book up to price_cap,
+    /// capped by capital limits. Returns (total_tokens, estimated_cost, sweep_price).
+    /// sweep_price is the highest ask level we'd fill against (used as FAK limit price).
+    fn compute_sweep(&self, book: &TokenBook) -> (f64, f64, f64) {
+        if book.ask_levels.is_empty() { return (0.0, 0.0, MAX_SWEEP_PRICE); }
         let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION);
         let mut tokens = 0.0_f64;
         let mut cost = 0.0_f64;
+        let mut sweep_price = book.best_ask.max(book.ask_levels[0].price);
         for level in &book.ask_levels {
             if level.price > MAX_SWEEP_PRICE { break; }
             let remaining = max_usdc - cost;
@@ -616,8 +618,13 @@ impl OracleEngine {
             if t < 0.5 && tokens == 0.0 { break; } // first level must have some depth
             tokens += t;
             cost += t * level.price;
+            sweep_price = level.price; // track highest level we'd fill
         }
-        (tokens, cost)
+        // If no levels were within cap, use best_ask so the FAK can still fill
+        if tokens == 0.0 {
+            sweep_price = book.best_ask.min(MAX_SWEEP_PRICE);
+        }
+        (tokens, cost, sweep_price)
     }
 
     fn execute_sweep(
@@ -626,6 +633,7 @@ impl OracleEngine {
         swept_side: SweptSide,
         total_tokens: f64,
         _estimated_cost: f64,
+        sweep_price: f64,
     ) {
         let available = self.capital_usdc.min(MAX_BET_USDC);
         if available < MIN_ORDER_SIZE {
@@ -642,13 +650,14 @@ impl OracleEngine {
         let market_id = MarketId { token_id: token_hash, condition_id: [0u8; 32] };
         let neg_risk = market.neg_risk;
 
-        // Send ONE FAK order at MAX_SWEEP_PRICE for the full token amount.
-        // The CLOB will fill against all available asks up to this price.
-        // Per-level orders fail because the book moves between WS snapshot and order arrival.
+        // Send ONE FAK order at the actual sweep_price (highest ask level we'd fill).
+        // Using a dynamic price instead of a hardcoded cap prevents FAK kills when
+        // the book has moved above the old 0.97 ceiling.
+        let price_cap = sweep_price.min(MAX_SWEEP_PRICE);
         let sz_rounded = (total_tokens * 10000.0).round() / 10000.0;
-        let actual_cost = sz_rounded * MAX_SWEEP_PRICE; // worst-case cost reservation
+        let actual_cost = sz_rounded * price_cap; // worst-case cost reservation
         let actual_cost = actual_cost.min(available * MAX_CAPITAL_FRACTION);
-        let sz_capped = actual_cost / MAX_SWEEP_PRICE;
+        let sz_capped = actual_cost / price_cap;
         let sz_final = (sz_capped * 10000.0).round() / 10000.0;
         if sz_final < MIN_ORDER_SIZE {
             self.executing_slugs.remove(&market.event_slug);
@@ -658,7 +667,7 @@ impl OracleEngine {
         let signals = vec![TradeSignal {
             market_id,
             side: Side::Buy,
-            price: Decimal::from_f64_retain(MAX_SWEEP_PRICE).unwrap_or(Decimal::new(97, 2)),
+            price: Decimal::from_f64_retain(price_cap).unwrap_or(Decimal::new(999, 3)),
             size: Decimal::from_f64_retain(sz_final).unwrap_or(Decimal::new(5, 0)),
             order_type: OrderType::ImmediateOrCancel,
             urgency: SignalUrgency::Critical,
@@ -666,11 +675,11 @@ impl OracleEngine {
             signal_timestamp_ns: 0,
         }];
 
-        let reserved = sz_final * MAX_SWEEP_PRICE;
+        let reserved = sz_final * price_cap;
         self.capital_usdc -= reserved;
         let side_label = match swept_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
-        info!("🚀 SWEEP {} @ {:.2} | {:.0} tokens | ${:.2} reserved | {}",
-              side_label, MAX_SWEEP_PRICE, sz_final, reserved, market.title);
+        info!("🚀 SWEEP {} @ {:.3} | {:.0} tokens | ${:.2} reserved | {}",
+              side_label, price_cap, sz_final, reserved, market.title);
 
         let sweep_tx = self.sweep_tx.clone();
         let executor = self.executor.clone();

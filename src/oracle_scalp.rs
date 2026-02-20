@@ -1625,7 +1625,9 @@ async fn run_background_redeem(
     let hmac_msg = format!("{}{}{}{}", timestamp_str, "POST", "/submit", body_str);
     use base64::Engine as _;
     let secret_trimmed = config.polymarket.api_secret.trim();
-    let hmac_key = match base64::engine::general_purpose::STANDARD.decode(secret_trimmed) {
+    let hmac_key = match base64::engine::general_purpose::STANDARD.decode(secret_trimmed)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(secret_trimmed))
+    {
         Ok(bytes) => bytes,
         Err(e) => {
             return RedeemResult {

@@ -365,6 +365,8 @@ impl OracleEngine {
         };
         if self.executing_slugs.contains(&market.event_slug) { return; }
         if self.failed_slugs.contains(&market.event_slug) { return; }
+        // Block new sweeps while ANY sweep is in-flight — on-chain balance is shared
+        if !self.executing_slugs.is_empty() { return; }
         // Allow scaling into a position if price has moved further in our favor.
         // Only block if we already hold >= 90% of max capital in this market.
         if let Some(pos) = self.positions.iter().find(|p| p.market.event_slug == market.event_slug && !p.redeemed) {

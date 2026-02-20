@@ -76,10 +76,18 @@ async fn main() -> anyhow::Result<()> {
     pin_to_core();
     
     // Load configuration
-    let config = Arc::new(Config::load().unwrap_or_else(|e| {
+    let mut config_mut = Config::load().unwrap_or_else(|e| {
         warn!("Config file load failed ({}), using defaults with env vars", e);
         Config::load_with_defaults()
-    }));
+    });
+    // Oracle scalper doesn't need HFT-level timeouts — increase for reliable order submission
+    let is_oracle_scalp_check = std::env::var("ORACLE_SCALP_MODE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if is_oracle_scalp_check {
+        config_mut.network.order_timeout_ms = 5000;
+    }
+    let config = Arc::new(config_mut);
     info!("Configuration loaded");
     info!("  - Max taker fee: {}bps", config.trading.max_taker_fee_bps);
     info!("  - Kill switch threshold: {}%", config.risk.kill_switch_threshold_pct);

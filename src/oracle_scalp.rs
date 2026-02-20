@@ -1053,52 +1053,72 @@ async fn submit_sweep_orders(
         }
     }
 
-    // Poll GET /order/{orderId} for each matched order to get actual fill amounts.
-    // Polymarket typically settles FAK fills within ~500ms.
+    // Poll GET /data/order/{orderId} for each matched order to get actual fill amounts.
+    // Polymarket OpenOrder object uses field "size_matched" (snake_case).
+    // FAK orders typically settle within 1-2s; retry up to 3 times with 1s gaps.
     if !matched_order_ids.is_empty() {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let rest_url = executor.rest_url();
         let http = executor.http_client();
         for (order_id, req_size, req_price) in &matched_order_ids {
             let url = format!("{}/data/order/{}", rest_url, order_id);
-            match http.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    match resp.json::<serde_json::Value>().await {
-                        Ok(v) => {
-                            // GET /order response: sizeFilled (decimal string, human-readable tokens)
-                            // and price (decimal string)
-                            let size_filled = v["sizeFilled"].as_str()
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let price_used = v["price"].as_str()
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .unwrap_or(*req_price);
-                            let status = v["status"].as_str().unwrap_or("UNKNOWN");
-                            let cost = size_filled * price_used;
-                            tokens_total += size_filled;
-                            cost_total += cost;
-                            info!("   ✅ {} fill: {:.1} tokens @ {:.3} = ${:.2} [{}] ({})",
-                                  side_label, size_filled, price_used, cost, status, order_id);
-                        }
-                        Err(e) => {
-                            warn!("   ⚠️  fill poll parse error for {}: {} — using req size {:.1}",
-                                  order_id, e, req_size);
-                            tokens_total += req_size;
-                            cost_total += req_size * req_price;
+            let mut size_filled = 0.0_f64;
+            let mut price_used = *req_price;
+            let mut poll_ok = false;
+            for attempt in 0..3u32 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+                match http.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<serde_json::Value>().await {
+                            Ok(v) => {
+                                // Polymarket OpenOrder: size_matched = tokens filled (snake_case)
+                                let matched = v["size_matched"].as_str()
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(0.0);
+                                let p = v["price"].as_str()
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .unwrap_or(*req_price);
+                                let status = v["status"].as_str().unwrap_or("UNKNOWN");
+                                // Retry if still MATCHED/OPEN and size_matched=0
+                                if matched == 0.0 && attempt < 2 {
+                                    debug!("   ⏳ fill poll attempt {}: {} status={} size_matched=0 — retrying",
+                                           attempt + 1, order_id, status);
+                                    continue;
+                                }
+                                size_filled = matched;
+                                price_used = p;
+                                poll_ok = true;
+                                info!("   ✅ {} fill: {:.4} tokens @ {:.4} = ${:.4} [{}] ({})",
+                                      side_label, size_filled, price_used,
+                                      size_filled * price_used, status, order_id);
+                                break;
+                            }
+                            Err(e) => {
+                                warn!("   ⚠️  fill poll parse error for {}: {}", order_id, e);
+                                break;
+                            }
                         }
                     }
+                    Ok(resp) => {
+                        warn!("   ⚠️  fill poll {} returned HTTP {}", order_id, resp.status());
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  fill poll network error for {}: {}", order_id, e);
+                        break;
+                    }
                 }
-                Ok(resp) => {
-                    warn!("   ⚠️  fill poll {} returned {}", order_id, resp.status());
-                    tokens_total += req_size;
-                    cost_total += req_size * req_price;
-                }
-                Err(e) => {
-                    warn!("   ⚠️  fill poll network error for {}: {} — using req size {:.1}",
-                          order_id, e, req_size);
-                    tokens_total += req_size;
-                    cost_total += req_size * req_price;
-                }
+            }
+            if poll_ok {
+                tokens_total += size_filled;
+                cost_total += size_filled * price_used;
+            } else {
+                // Poll failed entirely — fall back to requested size so capital isn't lost
+                warn!("   ⚠️  fill poll gave up for {} — crediting req size {:.4}", order_id, req_size);
+                tokens_total += req_size;
+                cost_total += req_size * req_price;
             }
         }
     }

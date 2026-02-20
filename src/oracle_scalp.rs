@@ -31,8 +31,8 @@ use tracing::{info, warn, error, debug};
 
 const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profitable wallet timing
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_BID: f64 = 0.45;   // Winning side best_bid >= 45¢ — enter early like RetamzZ
-const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — complementary threshold
+const MIN_WINNING_BID: f64 = 0.60;   // Winning side best_bid >= 60¢ — clear lean, avoids coin-flip trades
+const MAX_LOSING_BID: f64 = 0.40;    // Losing side best_bid <= 40¢ — complementary threshold
 const MAX_SWEEP_PRICE: f64 = 0.999;  // Hard cap — buying at 0.999 still nets $0.001/token after fees at resolution
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
@@ -1619,7 +1619,7 @@ async fn run_background_redeem(
     });
 
     // Auth headers — same HMAC pattern as CLOB API
-    let timestamp = chrono::Utc::now().timestamp_millis().to_string();
+    let timestamp = chrono::Utc::now().timestamp().to_string(); // seconds, not millis — SDK uses Math.floor(Date.now()/1000)
     let body_str = request_body.to_string();
     let hmac_msg = format!("{}{}{}{}", timestamp, "POST", "/submit", body_str);
     use base64::Engine as _;

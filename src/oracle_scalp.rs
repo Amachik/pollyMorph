@@ -18,7 +18,7 @@ use ethers::types::{Address, U256};
 use futures_util::FutureExt;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -143,6 +143,8 @@ pub struct OracleEngine {
     redeem_rx: mpsc::Receiver<RedeemResult>,
     redeem_tx: mpsc::Sender<RedeemResult>,
     event_detail_cache: HashMap<String, Vec<ArbMarket>>,
+    /// Recent spot prices per asset: (timestamp, price), kept for last 90s
+    spot_prices: HashMap<ArbAsset, VecDeque<(std::time::Instant, f64)>>,
 }
 
 impl OracleEngine {
@@ -209,10 +211,55 @@ impl OracleEngine {
             last_debug_log: HashMap::new(),
             sweep_rx, sweep_tx, redeem_rx, redeem_tx,
             event_detail_cache: HashMap::new(),
+            spot_prices: HashMap::new(),
         }
     }
 
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> { self.shutdown.clone() }
+
+    /// Fetch current spot price for all 4 assets from Binance and store in spot_prices.
+    async fn update_spot_prices(&mut self) {
+        let symbols = [
+            (ArbAsset::BTC, "BTCUSDT"),
+            (ArbAsset::ETH, "ETHUSDT"),
+            (ArbAsset::SOL, "SOLUSDT"),
+            (ArbAsset::XRP, "XRPUSDT"),
+        ];
+        let now = std::time::Instant::now();
+        for (asset, sym) in &symbols {
+            let url = format!("https://api.binance.com/api/v3/ticker/price?symbol={}", sym);
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(v) = resp.json::<serde_json::Value>().await {
+                        if let Some(price) = v["price"].as_str().and_then(|s| s.parse::<f64>().ok()) {
+                            let deque = self.spot_prices.entry(*asset).or_insert_with(VecDeque::new);
+                            deque.push_back((now, price));
+                            // Keep only last 90s of data
+                            while deque.front().map_or(false, |(t, _)| now.duration_since(*t).as_secs() > 90) {
+                                deque.pop_front();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns spot price momentum for an asset over the last `window_secs`.
+    /// Positive = price rising, Negative = price falling.
+    /// Returns None if insufficient data.
+    fn spot_momentum(&self, asset: ArbAsset, window_secs: u64) -> Option<f64> {
+        let deque = self.spot_prices.get(&asset)?;
+        if deque.len() < 2 { return None; }
+        let now = std::time::Instant::now();
+        let latest = deque.back().map(|(_, p)| *p)?;
+        // Find oldest sample within the window
+        let oldest = deque.iter()
+            .find(|(t, _)| now.duration_since(*t).as_secs() <= window_secs)
+            .map(|(_, p)| *p)?;
+        Some((latest - oldest) / oldest * 100.0) // % change
+    }
 
     pub async fn run(&mut self) {
         info!("🎯 ORACLE ENGINE STARTED — Capital: ${:.2}", self.capital_usdc);
@@ -265,6 +312,7 @@ impl OracleEngine {
                         info!("🛑 ORACLE ENGINE shutting down");
                         break;
                     }
+                    self.update_spot_prices().await;
                     self.check_and_redeem().await;
                     self.discover_and_subscribe().await;
                 }
@@ -339,15 +387,30 @@ impl OracleEngine {
         // The AMM hasn't fully repriced yet — we buy before it does.
         // Only require the winning side >= MIN_WINNING_PRICE and strictly dominant.
         // Cap at MAX_SWEEP_PRICE: 10% taker fee means buying at 0.85 costs $0.935 net.
+        // Spot price momentum check: require price to be moving in the oracle direction.
+        // Use 30s window; if no data yet, allow trade (fail-open on first startup).
+        let momentum = self.spot_momentum(market.asset, 30);
+        let momentum_ok = |side: SweptSide| -> bool {
+            match momentum {
+                None => true, // no data yet — allow
+                Some(pct) => match side {
+                    SweptSide::Up   => pct >= -0.05, // price not falling hard
+                    SweptSide::Down => pct <= 0.05,  // price not rising hard
+                },
+            }
+        };
+
         let (winning_side, winning_book) =
             if up_book.best_ask >= MIN_WINNING_PRICE
                 && up_book.best_ask <= MAX_SWEEP_PRICE
                 && down_book.best_ask <= MAX_LOSING_PRICE
+                && momentum_ok(SweptSide::Up)
             {
                 (SweptSide::Up, up_book)
             } else if down_book.best_ask >= MIN_WINNING_PRICE
                 && down_book.best_ask <= MAX_SWEEP_PRICE
                 && up_book.best_ask <= MAX_LOSING_PRICE
+                && momentum_ok(SweptSide::Down)
             {
                 (SweptSide::Down, down_book)
             } else {
@@ -368,8 +431,9 @@ impl OracleEngine {
         if total_tokens < MIN_ORDER_SIZE || total_cost < 1.0 { return; }
 
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
-        info!("🎯 ORACLE SIGNAL: {} | {} @ {:.3} | {:.0} tokens | ${:.2} cost | {:.0}s left",
-              market.title, side_label, winning_book.best_ask, total_tokens, total_cost, secs_remaining);
+        let mom_str = momentum.map_or("n/a".to_string(), |m| format!("{:+.3}%", m));
+        info!("🎯 ORACLE SIGNAL: {} | {} @ {:.3} | {:.0} tokens | ${:.2} cost | {:.0}s left | spot {}",
+              market.title, side_label, winning_book.best_ask, total_tokens, total_cost, secs_remaining, mom_str);
 
         self.executing_slugs.insert(market.event_slug.clone());
         self.execute_sweep(&market, winning_side, sweep_orders, total_cost);

@@ -29,11 +29,11 @@ use tracing::{info, warn, error, debug};
 // Constants
 // ---------------------------------------------------------------------------
 
-const ENTRY_WINDOW_SECS: i64 = 60;   // Only enter in final 60s — outcome much more certain
+const ENTRY_WINDOW_SECS: i64 = 300;  // Enter in final 5 min — earlier = cheaper prices, more tokens
 const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_PRICE: f64 = 0.75; // Winning side must be >= 75¢ to signal
-const MAX_LOSING_PRICE: f64 = 0.20;  // Losing side must be <= 20¢ to confirm clear outcome
-const MAX_SWEEP_PRICE: f64 = 0.85;  // 10% taker fee -> net cost 0.935, profit $0.065/token (7% ROI)
+const MIN_WINNING_PRICE: f64 = 0.80; // Winning side must be >= 80¢ — high confidence, still room to profit
+const MAX_LOSING_PRICE: f64 = 0.16;  // Losing side must be <= 16¢ — clear outcome required
+const MAX_SWEEP_PRICE: f64 = 0.88;  // 10% taker fee -> net cost 0.968, profit $0.032/token at 0.88
 const MAX_BET_USDC: f64 = 500.0;
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 5.0;
@@ -48,6 +48,14 @@ const SERIES_SLUGS: &[&str] = &[
     "eth-up-or-down-15m",
     "sol-up-or-down-15m",
     "xrp-up-or-down-15m",
+    "btc-up-or-down-5m",
+    "eth-up-or-down-5m",
+    "sol-up-or-down-5m",
+    "xrp-up-or-down-5m",
+    "btc-up-or-down-1h",
+    "eth-up-or-down-1h",
+    "sol-up-or-down-1h",
+    "xrp-up-or-down-1h",
 ];
 
 // ---------------------------------------------------------------------------
@@ -361,7 +369,12 @@ impl OracleEngine {
         };
         if self.executing_slugs.contains(&market.event_slug) { return; }
         if self.failed_slugs.contains(&market.event_slug) { return; }
-        if self.has_position(&market.event_slug) { return; }
+        // Allow scaling into a position if price has moved further in our favor.
+        // Only block if we already hold >= 90% of max capital in this market.
+        if let Some(pos) = self.positions.iter().find(|p| p.market.event_slug == market.event_slug && !p.redeemed) {
+            let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION);
+            if pos.cost_usdc >= max_usdc * 0.90 { return; } // already fully sized
+        }
 
         let now = chrono::Utc::now().timestamp();
         let secs_remaining = market.event_end_ts - now;
@@ -846,8 +859,11 @@ impl OracleEngine {
             candidates.push((id, end_ts));
         }
         candidates.sort_by_key(|(_, ts)| *ts);
-        // Keep only the next 8 events (covers ~2 hours of 15m markets)
-        candidates.truncate(8);
+        // Keep only the next N events based on market duration
+        let keep = if series_slug.contains("-5m") { 3 }       // 15 min coverage
+                   else if series_slug.contains("-1h") { 3 }  // 3 hour coverage
+                   else { 8 };                                 // 15m: 2 hour coverage
+        candidates.truncate(keep);
 
         if candidates.is_empty() { return Ok(Vec::new()); }
 

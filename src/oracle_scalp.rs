@@ -236,8 +236,9 @@ impl OracleEngine {
 
         let chainlink_prices = Arc::new(ChainlinkPrices::new());
         let cl_prices_for_poller = chainlink_prices.clone();
+        let polygon_rpc = config.polymarket.polygon_rpc.clone();
         tokio::spawn(async move {
-            run_chainlink_poller(cl_prices_for_poller).await;
+            run_chainlink_poller(cl_prices_for_poller, polygon_rpc).await;
         });
 
         let mut recovered = load_positions();

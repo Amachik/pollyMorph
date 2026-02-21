@@ -18,14 +18,14 @@ const ETH_USD_ADDR: &str  = "0xF9680D99D6C9589e2a93a78A04A279e509205945";
 const SOL_USD_ADDR: &str  = "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC";
 const XRP_USD_ADDR: &str  = "0x785ba89291f676b5386652eB12b30cF361020694";
 
-/// Polygon RPC endpoints in priority order.
-/// Tested from Amsterdam VPS — only 1rpc.io/matic works for eth_call without API key.
+/// Fallback Polygon RPC endpoints (no API key required).
+/// Used when the primary RPC from config (Alchemy) fails.
 /// polygon-rpc.com: requires API key (tenant disabled)
 /// rpc.ankr.com:    requires API key
 /// polygon.llamarpc.com: returns empty body for eth_call POST
-const POLYGON_RPCS: &[&str] = &[
+const POLYGON_RPC_FALLBACKS: &[&str] = &[
     "https://1rpc.io/matic",
-    "https://polygon.llamarpc.com", // fallback — may start working
+    "https://polygon.llamarpc.com",
 ];
 
 /// `latestRoundData()` selector
@@ -124,8 +124,8 @@ fn parse_latest_round_data(hex: &str) -> Option<(f64, i64)> {
 }
 
 /// Fetch the latest price for a single asset via JSON-RPC `eth_call`.
-/// Tries each RPC in POLYGON_RPCS order, returns first successful result.
-async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset) -> Option<PriceSample> {
+/// Tries each RPC in order, returns first successful result.
+async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset, rpcs: &[String]) -> Option<PriceSample> {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "eth_call",
@@ -136,9 +136,9 @@ async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset) -> Option<
         "id": 1
     });
 
-    for rpc in POLYGON_RPCS {
+    for rpc in rpcs {
         let resp = match client
-            .post(*rpc)
+            .post(rpc.as_str())
             .json(&payload)
             .timeout(Duration::from_secs(5))
             .send()
@@ -155,7 +155,7 @@ async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset) -> Option<
 
         // Skip RPC errors (e.g. rate limit, method not supported)
         if json.get("error").is_some() {
-            debug!("⛓️  {} eth_call error from {}: {:?}", asset.label(), rpc, json["error"]);
+            debug!("⛓️  {} eth_call error from {}: {:?}", asset.label(), rpc.as_str(), json["error"]);
             continue;
         }
 
@@ -178,12 +178,22 @@ async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset) -> Option<
 }
 
 /// Background task: polls all 4 Chainlink feeds every POLL_INTERVAL_MS.
+/// Uses primary_rpc (Alchemy from .env) first, falls back to public RPCs.
 /// Writes results into the shared `ChainlinkPrices` state.
-pub async fn run_chainlink_poller(prices: Arc<ChainlinkPrices>) {
+pub async fn run_chainlink_poller(prices: Arc<ChainlinkPrices>, primary_rpc: String) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("Failed to build HTTP client for Chainlink poller");
+
+    // Build RPC list once: Alchemy first, then public fallbacks
+    let mut rpcs: Vec<String> = Vec::new();
+    if !primary_rpc.is_empty() {
+        rpcs.push(primary_rpc.clone());
+    }
+    for fb in POLYGON_RPC_FALLBACKS {
+        rpcs.push(fb.to_string());
+    }
 
     loop {
         // Fetch all 4 assets concurrently — ~200ms total instead of ~800ms sequential
@@ -191,7 +201,8 @@ pub async fn run_chainlink_poller(prices: Arc<ChainlinkPrices>) {
             .iter()
             .map(|&asset| {
                 let client = client.clone();
-                async move { (asset, fetch_price(&client, asset).await) }
+                let rpcs = rpcs.clone();
+                async move { (asset, fetch_price(&client, asset, &rpcs).await) }
             })
             .collect();
 

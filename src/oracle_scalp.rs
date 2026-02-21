@@ -42,12 +42,10 @@ const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy fr
 const FAIR_VALUE_THRESHOLD: f64 = 0.94; // Only enter when P(win) >= 94% (clear positive EV at ask<=0.92)
 const EDGE_THRESHOLD: f64 = 0.02;    // Require fair_value - ask >= 2¢ (buying underpriced tokens)
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
-const SIGNAL_COOLDOWN_MS: u128 = 500;   // Global signal cooldown — 500ms allows WS-driven signals to fire quickly
 const MAX_BET_USDC: f64 = 10_000.0;    // Hard ceiling — never risk more than $10k in one trade
 const BET_FRACTION: f64 = 0.40;        // Bet 40% of available capital per trade
 const BET_MIN_USDC: f64 = 5.0;         // Never bet less than $5 — min_size=5 tokens at ~$0.92 = $4.60 minimum
 const BET_MAX_CAPITAL_FRACTION: f64 = 0.50; // Never risk more than 50% of capital in one trade
-const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 1.0;   // CLOB minimum ~1 token; sizing is dynamic based on balance
 const MARKET_SCAN_INTERVAL_SECS: u64 = 10; // Housekeeping: discover, reconcile, redeem
 const BOOK_POLL_INTERVAL_SECS: u64 = 2;    // REST book refresh + oracle update + signal check

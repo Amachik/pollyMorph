@@ -35,10 +35,12 @@ const ENTRY_WINDOW_SECS: i64 = 180;  // Enter in final 3 min — market directio
 const MIN_SECS_REMAINING: i64 = 10;  // Don't enter in final 10s — not enough time for sell to route
 const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
-const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: don't pay more than 93¢ (5¢ margin to sell at 0.98)
+const MAX_SWEEP_PRICE: f64 = 0.92;   // Buy cap: don't pay more than 92¢
 const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy from us at 0.98
-const FAIR_VALUE_THRESHOLD: f64 = 0.80; // Chainlink model: only enter when P(win) >= 80%
-const EDGE_THRESHOLD: f64 = -0.05;   // Chainlink model: allow up to 5¢ overpay vs fair value (profit comes from $1 redemption)
+// EV math: profit = P(win)*$1.00 - ask. For positive EV at ask=0.92: need P(win) > 0.92.
+// Set threshold to 0.94 to require clear positive EV margin.
+const FAIR_VALUE_THRESHOLD: f64 = 0.94; // Only enter when P(win) >= 94% (clear positive EV at ask<=0.92)
+const EDGE_THRESHOLD: f64 = 0.02;    // Require fair_value - ask >= 2¢ (buying underpriced tokens)
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade

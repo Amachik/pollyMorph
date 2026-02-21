@@ -809,12 +809,14 @@ impl OracleEngine {
                     },
                 }
             };
-            if up_book.best_bid >= MIN_WINNING_BID
+            // Fallback requires bid >= MAX_SWEEP_PRICE to ensure positive EV:
+            // if buyers pay >= 0.92, P(win) >= 0.92 > our ask cap of 0.92 → EV > 0
+            if up_book.best_bid >= MAX_SWEEP_PRICE
                 && down_book.best_bid <= MAX_LOSING_BID
                 && momentum_ok(SweptSide::Up)
             {
                 (SweptSide::Up, up_book, "BID")
-            } else if down_book.best_bid >= MIN_WINNING_BID
+            } else if down_book.best_bid >= MAX_SWEEP_PRICE
                 && up_book.best_bid <= MAX_LOSING_BID
                 && momentum_ok(SweptSide::Down)
             {

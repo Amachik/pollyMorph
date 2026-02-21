@@ -1132,10 +1132,10 @@ impl OracleEngine {
             for pos in self.positions.iter_mut() {
                 if pos.market.event_slug == result.event_slug && !pos.redeemed {
                     pos.redeem_attempts += 1;
-                    if pos.redeem_attempts >= 3 {
+                    if pos.redeem_attempts >= 20 {
                         pos.redeemed = true; // stop retrying
                         gave_up = true;
-                        error!("🚫 Giving up on redeem for {} after 3 failures — manual claim required",
+                        error!("🚫 Giving up on redeem for {} after 20 failures — manual claim required",
                                result.event_slug);
                     }
                     break;
@@ -1263,7 +1263,7 @@ impl OracleEngine {
 
     async fn check_and_redeem(&mut self) {
         let now = chrono::Utc::now().timestamp();
-        let redeem_cooldown = std::time::Duration::from_secs(30);
+        let redeem_cooldown = std::time::Duration::from_secs(10);
         // Deduplicate by slug — only one redeem attempt per market per tick,
         // even if multiple positions exist for the same slug.
         let mut seen_slugs: HashSet<String> = HashSet::new();
@@ -1271,7 +1271,7 @@ impl OracleEngine {
             .filter(|p| {
                 !p.redeemed
                     && !self.executing_slugs.contains(&p.market.event_slug)
-                    && now >= p.market.event_end_ts + 60
+                    && now >= p.market.event_end_ts + 30
                     && self.last_redeem_attempt.get(&p.market.event_slug)
                         .map_or(true, |t| t.elapsed() >= redeem_cooldown)
                     && seen_slugs.insert(p.market.event_slug.clone())

@@ -31,11 +31,11 @@ use tracing::{info, warn, error, debug};
 // ---------------------------------------------------------------------------
 
 const ENTRY_WINDOW_SECS: i64 = 180;  // Enter in final 3 min — market direction is clear but sweep bots haven't arrived
-const MIN_SECS_REMAINING: i64 = 15;  // Don't enter in final 15s — not enough time for sell to route
-const MIN_WINNING_BID: f64 = 0.85;   // Winning side best_bid >= 85¢ — market has decided direction
-const MAX_LOSING_BID: f64 = 0.15;    // Losing side best_bid <= 15¢ — other side nearly dead
-const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: don't pay more than 93¢ (4¢ margin to sell at 0.97)
-const EXIT_SELL_PRICE: f64 = 0.97;   // Sell limit price: sweep bots will buy from us at 0.97
+const MIN_SECS_REMAINING: i64 = 10;  // Don't enter in final 10s — not enough time for sell to route
+const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
+const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
+const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: don't pay more than 93¢ (5¢ margin to sell at 0.98)
+const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy from us at 0.98
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade

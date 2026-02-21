@@ -934,12 +934,13 @@ impl OracleEngine {
                         let up_token_id = pos.market.up_token_id.clone();
                         let down_token_id = pos.market.down_token_id.clone();
                         let swept_side = pos.swept_side;
+                        let neg_risk = pos.market.neg_risk;
                         let tokens = pos.tokens_bought;
                         let cost = pos.cost_usdc;
                         tokio::spawn(async move {
                             let r = run_background_redeem(
                                 &config, &condition_id, &up_token_id, &down_token_id,
-                                swept_side, tokens, cost, &slug, &executor,
+                                swept_side, neg_risk, tokens, cost, &slug, &executor,
                             ).await;
                             let _ = redeem_tx.send(r).await;
                         });
@@ -997,6 +998,7 @@ impl OracleEngine {
             let up_token_id = pos.market.up_token_id.clone();
             let down_token_id = pos.market.down_token_id.clone();
             let swept_side = pos.swept_side;
+            let neg_risk = pos.market.neg_risk;
             let tokens = pos.tokens_bought;
             let cost = pos.cost_usdc;
             tokio::spawn(async move {
@@ -1004,7 +1006,7 @@ impl OracleEngine {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let r = run_background_redeem(
                     &config, &condition_id, &up_token_id, &down_token_id,
-                    swept_side, tokens, cost, &slug, &executor,
+                    swept_side, neg_risk, tokens, cost, &slug, &executor,
                 ).await;
                 let _ = redeem_tx.send(r).await;
             });
@@ -1479,6 +1481,7 @@ async fn run_background_redeem(
     _up_token_id: &str,
     _down_token_id: &str,
     swept_side: SweptSide,
+    neg_risk: bool,
     tokens: f64,
     cost: f64,
     event_slug: &str,
@@ -1492,9 +1495,6 @@ async fn run_background_redeem(
     info!("   🔄 [BG] Redeeming {:.0} tokens for {} via relayer", tokens, event_slug);
 
     // --- Build redeemPositions calldata (inner call) ---
-    // The CTF exchange contract holds the conditional tokens and handles redemption.
-    let ctf_address: Address = "0x4D97DcD97Ec945F40CF65F87097aCe5EA0476045"
-        .parse().expect("CTF address");
     let usdc_e: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         .parse().expect("USDC address");
 
@@ -1506,29 +1506,58 @@ async fn run_background_redeem(
             error: Some(format!("Invalid condition_id: {}", condition_id)),
         },
     };
-    let parent_collection = [0u8; 32];
 
-    // Inner calldata: redeemPositions(collateral, parentCollection, conditionId, indexSets)
-    let redeem_selector = &ethers::core::utils::keccak256(
-        b"redeemPositions(address,bytes32,bytes32,uint256[])"
-    )[..4];
-    let redeem_params = ethers::abi::encode(&[
-        ethers::abi::Token::Address(usdc_e),
-        ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
-        ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
-        // indexSets: only redeem the outcome we hold.
-        // UP token = index 0 → indexSet bit 0 → value 1 (binary 01)
-        // DOWN token = index 1 → indexSet bit 1 → value 2 (binary 10)
-        // Passing both [1,2] reverts because we have zero balance for the other side.
-        ethers::abi::Token::Array(vec![
-            ethers::abi::Token::Uint(match swept_side {
-                SweptSide::Up   => U256::from(1u64),
-                SweptSide::Down => U256::from(2u64),
-            }),
-        ]),
-    ]);
-    let mut inner_calldata = redeem_selector.to_vec();
-    inner_calldata.extend_from_slice(&redeem_params);
+    // --- Build inner calldata depending on market type ---
+    // neg_risk markets: NegRisk adapter redeemPositions(bytes32 conditionId, uint256[] amounts)
+    //   amounts = [yesTokens, noTokens] — UP is yes (index 0), DOWN is no (index 1)
+    // standard markets: CTF redeemPositions(address, bytes32, bytes32, uint256[] indexSets)
+    //   indexSets: UP=1 (bit 0), DOWN=2 (bit 1)
+    let tokens_u256 = U256::from((tokens * 1e6).round() as u64); // 6-decimal fixed point
+    let inner_calldata: Vec<u8> = if neg_risk {
+        let selector = &ethers::core::utils::keccak256(
+            b"redeemPositions(bytes32,uint256[])"
+        )[..4];
+        let (yes_amt, no_amt) = match swept_side {
+            SweptSide::Up   => (tokens_u256, U256::zero()),
+            SweptSide::Down => (U256::zero(), tokens_u256),
+        };
+        let params = ethers::abi::encode(&[
+            ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
+            ethers::abi::Token::Array(vec![
+                ethers::abi::Token::Uint(yes_amt),
+                ethers::abi::Token::Uint(no_amt),
+            ]),
+        ]);
+        let mut cd = selector.to_vec();
+        cd.extend_from_slice(&params);
+        cd
+    } else {
+        let parent_collection = [0u8; 32];
+        let selector = &ethers::core::utils::keccak256(
+            b"redeemPositions(address,bytes32,bytes32,uint256[])"
+        )[..4];
+        let params = ethers::abi::encode(&[
+            ethers::abi::Token::Address(usdc_e),
+            ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
+            ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
+            ethers::abi::Token::Array(vec![
+                ethers::abi::Token::Uint(match swept_side {
+                    SweptSide::Up   => U256::from(1u64),
+                    SweptSide::Down => U256::from(2u64),
+                }),
+            ]),
+        ]);
+        let mut cd = selector.to_vec();
+        cd.extend_from_slice(&params);
+        cd
+    };
+
+    // Target contract: NegRisk adapter for neg_risk markets, CTF exchange for standard
+    let redeem_target = if neg_risk {
+        "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+    } else {
+        "0x4D97DcD97Ec945F40CF65F87097aCe5EA0476045"
+    };
 
     // --- Proxy transaction constants (Polygon mainnet) ---
     // Source: https://github.com/Polymarket/builder-relayer-client/blob/main/src/config/index.ts
@@ -1572,13 +1601,14 @@ async fn run_background_redeem(
     let proxy_fn_selector = &ethers::core::utils::keccak256(
         b"proxy((uint8,address,uint256,bytes)[])"
     )[..4];
-    // ABI-encode the calls array: one element {typeCode=1, to=ctf_address, value=0, data=inner_calldata}
+    // ABI-encode the calls array: one element {typeCode=1, to=redeem_target, value=0, data=inner_calldata}
     // CallType.Call = "1" per @polymarket/builder-relayer-client types.d.ts (NOT 0!)
+    let redeem_target_addr: Address = redeem_target.parse().expect("redeem_target address");
     let encoded_proxy_params = ethers::abi::encode(&[
         ethers::abi::Token::Array(vec![
             ethers::abi::Token::Tuple(vec![
                 ethers::abi::Token::Uint(U256::from(1u64)),        // typeCode = 1 (Call)
-                ethers::abi::Token::Address(ctf_address),          // to = CTF contract
+                ethers::abi::Token::Address(redeem_target_addr),   // to = NegRisk adapter or CTF
                 ethers::abi::Token::Uint(U256::zero()),            // value = 0
                 ethers::abi::Token::Bytes(inner_calldata.clone()), // data = redeemPositions calldata
             ]),

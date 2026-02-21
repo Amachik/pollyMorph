@@ -1535,8 +1535,16 @@ async fn run_background_redeem(
         },
     };
 
-    let nonce = match relay_payload.get("nonce").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
+    let nonce = match relay_payload.get("nonce") {
+        Some(v) => {
+            if let Some(s) = v.as_str() { s.to_string() }
+            else if let Some(n) = v.as_u64() { n.to_string() }
+            else { return RedeemResult {
+                event_slug: event_slug.to_string(),
+                usdc_recovered: 0.0, profit: 0.0,
+                error: Some(format!("relay-payload nonce unexpected type: {}", relay_payload)),
+            }}
+        },
         None => return RedeemResult {
             event_slug: event_slug.to_string(),
             usdc_recovered: 0.0, profit: 0.0,
@@ -1591,8 +1599,10 @@ async fn run_background_redeem(
 
     let struct_hash = ethers::core::utils::keccak256(&preimage);
 
-    // Sign the struct hash directly (not EIP-191 prefixed — proxy.ts uses signMessage on raw hash)
-    let signature = match wallet.sign_hash(ethers::types::H256::from(struct_hash)) {
+    // proxy.ts calls signer.signMessage(structHash) which in ethers.js applies EIP-191 prefix:
+    // "\x19Ethereum Signed Message:\n32" + struct_hash
+    // This is different from sign_hash (raw). Must use sign_message on the raw 32-byte hash.
+    let signature = match wallet.sign_message(struct_hash.as_ref()).await {
         Ok(sig) => format!("0x{}", sig),
         Err(e) => return RedeemResult {
             event_slug: event_slug.to_string(),
@@ -1600,13 +1610,14 @@ async fn run_background_redeem(
             error: Some(format!("Signing failed: {}", e)),
         },
     };
+    debug!("   📝 Proxy struct_hash: 0x{} sig: {}", hex::encode(struct_hash), &signature[..20]);
 
     // --- Build and submit the proxy transaction request ---
     let request_body = serde_json::json!({
         "type": "PROXY",
         "from": eoa,
         "to": proxy_factory,
-        "proxyWallet": config.polymarket.proxy_address,
+        "proxyWallet": proxy_address,  // lowercase, matches relay-payload address query
         "data": calldata_hex,
         "nonce": nonce,
         "signature": signature,

@@ -158,7 +158,6 @@ pub struct ArbMarket {
     /// "Down" token CLOB ID
     pub down_token_id: String,
     /// Whether this market uses neg_risk exchange
-    #[serde(default = "bool_true")]
     pub neg_risk: bool,
     /// Tick size for price precision
     pub tick_size: f64,
@@ -175,8 +174,6 @@ pub struct ArbMarket {
     /// Taker fee in basis points for Down token
     pub down_fee_bps: u32,
 }
-
-fn bool_true() -> bool { true }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ArbAsset {

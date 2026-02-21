@@ -1514,9 +1514,8 @@ async fn run_background_redeem(
     //   indexSets: UP=1 (bit 0), DOWN=2 (bit 1)
     let tokens_u256 = U256::from((tokens * 1e6).round() as u64); // 6-decimal fixed point
     let inner_calldata: Vec<u8> = if neg_risk {
-        let selector = &ethers::core::utils::keccak256(
-            b"redeemPositions(bytes32,uint256[])"
-        )[..4];
+        // keccak256("redeemPositions(bytes32,uint256[])")[..4] = 0xf2a05475
+        let selector: &[u8] = &[0xf2, 0xa0, 0x54, 0x75];
         let (yes_amt, no_amt) = match swept_side {
             SweptSide::Up   => (tokens_u256, U256::zero()),
             SweptSide::Down => (U256::zero(), tokens_u256),
@@ -1533,18 +1532,15 @@ async fn run_background_redeem(
         cd
     } else {
         let parent_collection = [0u8; 32];
-        let selector = &ethers::core::utils::keccak256(
-            b"redeemPositions(address,bytes32,bytes32,uint256[])"
-        )[..4];
+        // keccak256("redeemPositions(address,bytes32,bytes32,uint256[])")[..4] = 0x1ba2fc81
+        let selector: &[u8] = &[0x1b, 0xa2, 0xfc, 0x81];
         let params = ethers::abi::encode(&[
             ethers::abi::Token::Address(usdc_e),
             ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
             ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
             ethers::abi::Token::Array(vec![
-                ethers::abi::Token::Uint(match swept_side {
-                    SweptSide::Up   => U256::from(1u64),
-                    SweptSide::Down => U256::from(2u64),
-                }),
+                ethers::abi::Token::Uint(U256::from(1u64)),
+                ethers::abi::Token::Uint(U256::from(2u64)),
             ]),
         ]);
         let mut cd = selector.to_vec();
@@ -1598,9 +1594,8 @@ async fn run_background_redeem(
     // ABI: proxy((uint8 typeCode, address to, uint256 value, bytes data)[])
     // CallType.Call = 0
     // Source: @polymarket/builder-relayer-client encode/proxy.js + abis/proxyFactory.js
-    let proxy_fn_selector = &ethers::core::utils::keccak256(
-        b"proxy((uint8,address,uint256,bytes)[])"
-    )[..4];
+    // keccak256("proxy((uint8,address,uint256,bytes)[])")[..4] = 0x9af96fa5
+    let proxy_fn_selector: &[u8] = &[0x9a, 0xf9, 0x6f, 0xa5];
     // ABI-encode the calls array: one element {typeCode=1, to=redeem_target, value=0, data=inner_calldata}
     // CallType.Call = "1" per @polymarket/builder-relayer-client types.d.ts (NOT 0!)
     let redeem_target_addr: Address = redeem_target.parse().expect("redeem_target address");

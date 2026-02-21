@@ -774,6 +774,25 @@ impl OracleEngine {
                 SweptSide::Down => result.market.down_token_id.clone(),
             };
             let token_hash = hash_asset_id(&token_id);
+            // CRITICAL: execute_signal looks up the token in token_registry by hash.
+            // The sell token must be registered or the CLOB call fails with
+            // "the orderbook does not exist". Copy market info from the buy token
+            // (both sides share the same neg_risk/fee/tick_size).
+            let buy_token_id = match result.swept_side {
+                SweptSide::Up   => result.market.down_token_id.clone(),
+                SweptSide::Down => result.market.up_token_id.clone(),
+            };
+            let buy_hash = hash_asset_id(&buy_token_id);
+            if let Some(info) = self.token_registry.get_info(buy_hash) {
+                use crate::types::TokenMarketInfo;
+                self.token_registry.register_full(token_hash, TokenMarketInfo {
+                    asset_id: token_id.clone(),
+                    ..info
+                });
+            } else {
+                // Fallback: register with defaults (neg_risk from market struct)
+                self.token_registry.register(token_hash, token_id.clone(), result.market.neg_risk);
+            }
             let market_id = MarketId { token_id: token_hash, condition_id: [0u8; 32] };
             let sell_signal = TradeSignal {
                 market_id,

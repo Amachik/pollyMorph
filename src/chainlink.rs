@@ -25,7 +25,7 @@ const POLYGON_RPC: &str = "https://1rpc.io/matic";
 const LATEST_ROUND_DATA_SELECTOR: &str = "0xfeaf968c";
 
 /// How often to poll each feed (milliseconds)
-const POLL_INTERVAL_MS: u64 = 3_000;
+const POLL_INTERVAL_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChainlinkAsset {
@@ -154,12 +154,23 @@ pub async fn run_chainlink_poller(prices: Arc<ChainlinkPrices>) {
         .expect("Failed to build HTTP client for Chainlink poller");
 
     loop {
-        for &asset in ChainlinkAsset::all() {
-            match fetch_price(&client, asset).await {
+        // Fetch all 4 assets concurrently — ~200ms total instead of ~800ms sequential
+        let futures: Vec<_> = ChainlinkAsset::all()
+            .iter()
+            .map(|&asset| {
+                let client = client.clone();
+                async move { (asset, fetch_price(&client, asset).await) }
+            })
+            .collect();
+
+        let results = futures_util::future::join_all(futures).await;
+        let now_chain = chrono::Utc::now().timestamp();
+
+        for (asset, result) in results {
+            match result {
                 Some(sample) => {
                     debug!("⛓️  Chainlink {}: ${:.4} (chain age: {}s)",
-                           asset.label(), sample.price,
-                           chrono::Utc::now().timestamp() - sample.updated_at);
+                           asset.label(), sample.price, now_chain - sample.updated_at);
                     prices.set(asset, sample);
                 }
                 None => {
@@ -167,6 +178,7 @@ pub async fn run_chainlink_poller(prices: Arc<ChainlinkPrices>) {
                 }
             }
         }
+
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 }

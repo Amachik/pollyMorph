@@ -2,11 +2,11 @@
 //!
 //! Strategy:
 //! 1. Monitor BTC/ETH/SOL/XRP 5m/15m Up/Down markets via CLOB WebSocket.
-//! 2. Enter EARLY (300s before end) when one side bid is 0.50-0.85 — market
-//!    is leaning but not yet priced in. Buy at 0.50-0.85.
+//! 2. Enter in final 180s when winning bid >= 0.85 and losing bid <= 0.15.
+//!    Buy the winning side at up to MAX_SWEEP_PRICE (0.93).
 //! 3. Immediately place a GTC limit SELL at EXIT_SELL_PRICE (0.97) after fill.
-//! 4. Profit when late-window bots (like our old strategy) buy from us at 0.97.
-//! 5. Fallback: if sell doesn't fill before market ends, redeem for $1.00.
+//! 4. Profit when sweep bots buy from us at 0.97 in the final seconds.
+//! 5. Fallback: if sell doesn't fill before market ends, cancel sell + redeem for $1.00.
 
 use crate::arb::{ArbAsset, ArbMarket, ArbWsEvent, BookLevel, TokenBook, WsCommand, run_book_watcher};
 use crate::config::Config;

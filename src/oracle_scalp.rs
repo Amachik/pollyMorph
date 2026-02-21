@@ -164,6 +164,8 @@ pub struct OracleEngine {
     needs_balance_refresh: bool,
     /// Cooldown: last time a signal was fired or attempted — prevents WS burst spam
     last_signal_fired: std::time::Instant,
+    /// Per-slug last redeem attempt time — prevents rapid retry after failure
+    last_redeem_attempt: HashMap<String, std::time::Instant>,
 }
 
 impl OracleEngine {
@@ -234,6 +236,7 @@ impl OracleEngine {
             last_sweep_attempt: HashMap::new(),
             last_debug_log: HashMap::new(),
             sweep_rx, sweep_tx, redeem_rx, redeem_tx,
+                last_redeem_attempt: HashMap::new(),
             event_detail_cache: HashMap::new(),
             spot_prices: HashMap::new(),
             spot_rx,
@@ -882,11 +885,14 @@ impl OracleEngine {
 
     async fn check_and_redeem(&mut self) {
         let now = chrono::Utc::now().timestamp();
+        let redeem_cooldown = std::time::Duration::from_secs(30);
         let to_check: Vec<OraclePosition> = self.positions.iter()
             .filter(|p| {
                 !p.redeemed
                     && !self.executing_slugs.contains(&p.market.event_slug)
                     && now >= p.market.event_end_ts + 60
+                    && self.last_redeem_attempt.get(&p.market.event_slug)
+                        .map_or(true, |t| t.elapsed() >= redeem_cooldown)
             })
             .cloned()
             .collect();
@@ -908,6 +914,7 @@ impl OracleEngine {
 
                     if won {
                         self.executing_slugs.insert(pos.market.event_slug.clone());
+                        self.last_redeem_attempt.insert(pos.market.event_slug.clone(), std::time::Instant::now());
                         let redeem_tx = self.redeem_tx.clone();
                         let config = self.config.clone();
                         let executor = self.executor.clone();
@@ -970,6 +977,7 @@ impl OracleEngine {
               if won { "WON ✅" } else { "LOST ❌" });
 
         if won {
+            self.last_redeem_attempt.insert(event_slug.clone(), std::time::Instant::now());
             let redeem_tx = self.redeem_tx.clone();
             let config = self.config.clone();
             let executor = self.executor.clone();

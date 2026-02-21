@@ -1543,13 +1543,14 @@ async fn run_background_redeem(
     let proxy_fn_selector = &ethers::core::utils::keccak256(
         b"proxy((uint8,address,uint256,bytes)[])"
     )[..4];
-    // ABI-encode the calls array: one element {typeCode=0, to=ctf_address, value=0, data=inner_calldata}
+    // ABI-encode the calls array: one element {typeCode=1, to=ctf_address, value=0, data=inner_calldata}
+    // CallType.Call = "1" per @polymarket/builder-relayer-client types.d.ts (NOT 0!)
     let encoded_proxy_params = ethers::abi::encode(&[
         ethers::abi::Token::Array(vec![
             ethers::abi::Token::Tuple(vec![
-                ethers::abi::Token::Uint(U256::zero()),           // typeCode = 0 (Call)
-                ethers::abi::Token::Address(ctf_address),         // to = CTF contract
-                ethers::abi::Token::Uint(U256::zero()),           // value = 0
+                ethers::abi::Token::Uint(U256::from(1u64)),        // typeCode = 1 (Call)
+                ethers::abi::Token::Address(ctf_address),          // to = CTF contract
+                ethers::abi::Token::Uint(U256::zero()),            // value = 0
                 ethers::abi::Token::Bytes(inner_calldata.clone()), // data = redeemPositions calldata
             ]),
         ]),

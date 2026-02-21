@@ -18,13 +18,14 @@ const ETH_USD_ADDR: &str  = "0xF9680D99D6C9589e2a93a78A04A279e509205945";
 const SOL_USD_ADDR: &str  = "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC";
 const XRP_USD_ADDR: &str  = "0x785ba89291f676b5386652eB12b30cF361020694";
 
-/// Polygon RPC endpoints in priority order (fastest first from Amsterdam VPS).
-/// Falls back to next on failure — polygon.llamarpc.com is 3.9ms but may block eth_call.
+/// Polygon RPC endpoints in priority order.
+/// Tested from Amsterdam VPS — only 1rpc.io/matic works for eth_call without API key.
+/// polygon-rpc.com: requires API key (tenant disabled)
+/// rpc.ankr.com:    requires API key
+/// polygon.llamarpc.com: returns empty body for eth_call POST
 const POLYGON_RPCS: &[&str] = &[
-    "https://polygon.llamarpc.com",
-    "https://polygon-rpc.com",
-    "https://rpc.ankr.com/polygon",
     "https://1rpc.io/matic",
+    "https://polygon.llamarpc.com", // fallback — may start working
 ];
 
 /// `latestRoundData()` selector

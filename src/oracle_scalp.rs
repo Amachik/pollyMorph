@@ -1454,7 +1454,7 @@ async fn run_background_redeem(
     condition_id: &str,
     _up_token_id: &str,
     _down_token_id: &str,
-    _swept_side: SweptSide,
+    swept_side: SweptSide,
     tokens: f64,
     cost: f64,
     event_slug: &str,

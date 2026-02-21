@@ -1521,11 +1521,9 @@ async fn run_background_redeem(
         "d21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
     ).expect("valid hash");
     // salt = keccak256(abi.encodePacked(address(eoa)))
-    // encodePacked(address) = left-padded 32 bytes (12 zero bytes + 20 address bytes)
+    // encodePacked(address) = raw 20 bytes (NO zero padding — abi.encode pads, encodePacked does NOT)
     let eoa_addr_bytes = hex::decode(eoa.trim_start_matches("0x")).unwrap_or_default();
-    let mut salt_preimage = vec![0u8; 12];
-    salt_preimage.extend_from_slice(&eoa_addr_bytes);
-    let salt = ethers::core::utils::keccak256(&salt_preimage);
+    let salt = ethers::core::utils::keccak256(&eoa_addr_bytes);
     // CREATE2: keccak256(0xff ++ factory ++ salt ++ initCodeHash)[12..]
     let factory_bytes = hex::decode(proxy_factory.trim_start_matches("0x")).unwrap_or_default();
     let mut create2_preimage = vec![0xffu8];

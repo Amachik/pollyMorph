@@ -657,6 +657,13 @@ impl OracleEngine {
 
         let (total_tokens, total_cost, sweep_price) = self.compute_sweep(&winning_book);
         if total_tokens < MIN_ORDER_SIZE || total_cost < 0.50 { return; }
+        // Require at least min_size tokens (CLOB minimum for GTC sell orders = 5).
+        // A fill below this threshold can't be sold and must wait for redemption.
+        if total_tokens < market.min_size as f64 {
+            debug!("⏳ {} — depth too thin: {:.1} tokens < min_size {:.0}",
+                   market.title, total_tokens, market.min_size);
+            return;
+        }
 
         // Insert slug FIRST to block all subsequent WS-triggered evaluations
         self.executing_slugs.insert(market.event_slug.clone());
@@ -819,6 +826,14 @@ impl OracleEngine {
                 sell_filled: false,
             });
             save_positions(&self.positions);
+
+            // Only place a GTC sell if we hold enough tokens to meet the CLOB minimum.
+            // The minimum order size is 5 tokens; smaller fills must wait for redemption.
+            if result.tokens_total < result.market.min_size as f64 {
+                info!("📤 SELL skipped: {:.2} tokens < min_size {:.0} — will redeem on resolution",
+                      result.tokens_total, result.market.min_size);
+                return;
+            }
 
             // Immediately place GTC limit sell at EXIT_SELL_PRICE
             // Late-window bots will sweep our ask as the market approaches resolution.

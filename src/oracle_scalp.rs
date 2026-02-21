@@ -1,11 +1,12 @@
-//! Oracle Front-Runner — Late-Window AMM Sweep Strategy
+//! Oracle Front-Runner — Early Entry + Sell-Exit Strategy (Option A)
 //!
-//! Replicates the RetamzZ wallet strategy on Polymarket:
-//! 1. Monitor BTC/ETH/SOL/XRP 15-minute Up/Down markets via CLOB WebSocket.
-//! 2. In the final ENTRY_WINDOW_SECS seconds, identify the winning side from
-//!    the AMM book price (the market's current best probability estimate).
-//! 3. Sweep the ENTIRE AMM ask book on the winning side via IOC taker orders.
-//! 4. Redeem for $1.00 per token after resolution.
+//! Strategy:
+//! 1. Monitor BTC/ETH/SOL/XRP 5m/15m Up/Down markets via CLOB WebSocket.
+//! 2. Enter EARLY (300s before end) when one side bid is 0.50-0.85 — market
+//!    is leaning but not yet priced in. Buy at 0.50-0.85.
+//! 3. Immediately place a GTC limit SELL at EXIT_SELL_PRICE (0.97) after fill.
+//! 4. Profit when late-window bots (like our old strategy) buy from us at 0.97.
+//! 5. Fallback: if sell doesn't fill before market ends, redeem for $1.00.
 
 use crate::arb::{ArbAsset, ArbMarket, ArbWsEvent, BookLevel, TokenBook, WsCommand, run_book_watcher};
 use crate::config::Config;
@@ -29,11 +30,12 @@ use tracing::{info, warn, error, debug};
 // Constants
 // ---------------------------------------------------------------------------
 
-const ENTRY_WINDOW_SECS: i64 = 120;  // Enter in final 2 min — matches profitable wallet timing
-const MIN_SECS_REMAINING: i64 = 10;
-const MIN_WINNING_BID: f64 = 0.85;   // Winning side best_bid >= 85¢ — market already decided
-const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
-const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee ceiling: Poly fee ~2%*min(p,1-p) → at 0.97 fee≈0.6%, profit $0.024/token
+const ENTRY_WINDOW_SECS: i64 = 300;  // Enter up to 5 min before end — buy early at 0.50-0.85
+const MIN_SECS_REMAINING: i64 = 30;  // Don't enter in final 30s — not enough time to sell
+const MIN_WINNING_BID: f64 = 0.55;   // Winning side best_bid >= 55¢ — market leaning but not priced in
+const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — clear directional signal
+const MAX_SWEEP_PRICE: f64 = 0.87;   // Buy cap: don't pay more than 87¢ (need room to sell at 0.97)
+const EXIT_SELL_PRICE: f64 = 0.97;   // Sell limit price: late-window bots will buy from us at 0.97
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade
@@ -75,6 +77,12 @@ struct OraclePosition {
     redeemed: bool,
     #[serde(default)]
     redeem_attempts: u32,
+    /// Order ID of the GTC sell limit placed after buy fill. None if not yet placed or already filled.
+    #[serde(default)]
+    sell_order_id: Option<String>,
+    /// Whether the sell exit already filled (profit taken, no redemption needed).
+    #[serde(default)]
+    sell_filled: bool,
 }
 
 #[derive(Debug)]
@@ -89,6 +97,9 @@ struct SweepResult {
     orders_count: usize,
     total_elapsed_ms: f64,
     error: Option<String>,
+    /// Set when this result is a sell-order confirmation (not a buy sweep).
+    #[allow(dead_code)]
+    sell_order_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -716,6 +727,7 @@ impl OracleEngine {
                     orders_ok: 0,
                     orders_count: 0,
                     total_elapsed_ms: 0.0,
+                    sell_order_id: None,
                     error: Some("Task panicked".to_string()),
                 }
             });
@@ -739,20 +751,89 @@ impl OracleEngine {
             // Successful fill — refresh on-chain balance to keep capital tracking accurate
             self.needs_balance_refresh = true;
             let avg = result.cost_total / result.tokens_total.max(0.001);
-            info!("   ✅ {:.0} {} tokens @ avg ${:.4} | edge: ${:.4}/token",
-                  result.tokens_total, side_label, avg, 1.0 - avg);
+            let edge = EXIT_SELL_PRICE - avg;
+            info!("   ✅ {:.0} {} tokens @ avg ${:.4} | target sell ${:.3} | edge: ${:.4}/token ({:.1}%)",
+                  result.tokens_total, side_label, avg, EXIT_SELL_PRICE, edge, edge / avg * 100.0);
             self.positions.push(OraclePosition {
-                market: result.market,
+                market: result.market.clone(),
                 swept_side: result.swept_side,
                 tokens_bought: result.tokens_total,
                 cost_usdc: result.cost_total,
                 entered_at: chrono::Utc::now(),
                 redeemed: false,
                 redeem_attempts: 0,
+                sell_order_id: None,
+                sell_filled: false,
             });
             save_positions(&self.positions);
+
+            // Immediately place GTC limit sell at EXIT_SELL_PRICE
+            // Late-window bots will sweep our ask as the market approaches resolution.
+            let token_id = match result.swept_side {
+                SweptSide::Up   => result.market.up_token_id.clone(),
+                SweptSide::Down => result.market.down_token_id.clone(),
+            };
+            let token_hash = hash_asset_id(&token_id);
+            let market_id = MarketId { token_id: token_hash, condition_id: [0u8; 32] };
+            let sell_signal = TradeSignal {
+                market_id,
+                side: Side::Sell,
+                price: Decimal::from_f64_retain(EXIT_SELL_PRICE).unwrap_or(Decimal::new(97, 2)),
+                size: Decimal::from_f64_retain((result.tokens_total * 10000.0).round() / 10000.0)
+                    .unwrap_or(Decimal::new(1, 0)),
+                order_type: OrderType::GoodTillCancelled,
+                urgency: SignalUrgency::Normal,
+                expected_profit_bps: ((EXIT_SELL_PRICE - avg) / avg * 10000.0) as i32,
+                signal_timestamp_ns: 0,
+            };
+            let executor = self.executor.clone();
+            let sweep_tx = self.sweep_tx.clone();
+            let event_slug = result.market.event_slug.clone();
+            let market_clone = result.market.clone();
+            let swept_side = result.swept_side;
+            let tokens = result.tokens_total;
+            let cost = result.cost_total;
+            tokio::spawn(async move {
+                match executor.execute_signal(sell_signal).await {
+                    Ok(order_id) => {
+                        info!("📤 SELL ORDER placed: {} {:.0} tokens @ ${:.3} | order_id={}",
+                              event_slug, tokens, EXIT_SELL_PRICE, order_id);
+                        // Send back a synthetic SweepResult carrying the sell_order_id.
+                        // tokens_total=0 signals to handle_sweep_result that this is a
+                        // sell-confirmation, not a new buy fill.
+                        let _ = sweep_tx.send(SweepResult {
+                            event_slug,
+                            market: market_clone,
+                            swept_side,
+                            estimated_cost: cost,
+                            tokens_total: 0.0,
+                            cost_total: cost,
+                            orders_ok: 1,
+                            orders_count: 1,
+                            total_elapsed_ms: 0.0,
+                            error: None,
+                            sell_order_id: Some(order_id),
+                        }).await;
+                    }
+                    Err(e) => {
+                        warn!("⚠️  Failed to place sell order for {}: {} — will redeem on resolution",
+                              event_slug, e);
+                    }
+                }
+            });
+        } else if let Some(ref oid) = result.sell_order_id {
+            // This is a sell-order confirmation coming back on the sweep channel.
+            // Store the order_id on the matching position so check_and_redeem can
+            // cancel it if the market ends without a fill.
+            for pos in self.positions.iter_mut() {
+                if pos.market.event_slug == result.event_slug && !pos.redeemed && !pos.sell_filled {
+                    pos.sell_order_id = Some(oid.clone());
+                    break;
+                }
+            }
+            save_positions(&self.positions);
         } else {
-            // All orders failed — refresh on-chain balance to detect if a previous
+            // All buy orders failed — refresh on-chain balance to detect if a previous
             // fill actually spent our USDC (the CLOB returns "not enough balance"
             // but result.error is None because individual failures aren't propagated)
             self.needs_balance_refresh = true;
@@ -876,16 +957,28 @@ impl OracleEngine {
 
         for pos in &dropped {
             let side_label = match pos.swept_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
-            warn!("🔄 RECONCILE: {} {} sold externally — refunding ${:.2} reserved capital",
-                  pos.market.title, side_label, pos.cost_usdc);
-            self.capital_usdc += pos.cost_usdc;
+            if pos.sell_order_id.is_some() {
+                // Token is gone and we had a GTC sell order — sell filled at EXIT_SELL_PRICE.
+                let proceeds = pos.tokens_bought * EXIT_SELL_PRICE;
+                let profit = proceeds - pos.cost_usdc;
+                self.capital_usdc += proceeds;
+                self.total_pnl += profit;
+                self.sweeps_completed += 1;
+                info!("💰 SELL EXIT: {} {} | +${:.2} proceeds | +${:.2} profit | Total P&L: ${:.2}",
+                      pos.market.title, side_label, proceeds, profit, self.total_pnl);
+            } else {
+                // No sell order — token sold manually or via UI, just refund cost basis.
+                warn!("🔄 RECONCILE: {} {} sold externally — refunding ${:.2} reserved capital",
+                      pos.market.title, side_label, pos.cost_usdc);
+                self.capital_usdc += pos.cost_usdc;
+            }
             self.positions.retain(|p| {
                 !(p.market.event_slug == pos.market.event_slug && !p.redeemed)
             });
         }
         if !dropped.is_empty() {
             save_positions(&self.positions);
-            info!("🔄 Reconciled: dropped {} externally-sold positions, capital now ${:.2}",
+            info!("🔄 Reconciled: {} positions closed, capital now ${:.2}",
                   dropped.len(), self.capital_usdc);
         }
     }
@@ -937,7 +1030,17 @@ impl OracleEngine {
                         let neg_risk = pos.market.neg_risk;
                         let tokens = pos.tokens_bought;
                         let cost = pos.cost_usdc;
+                        let sell_order_id = pos.sell_order_id.clone();
                         tokio::spawn(async move {
+                            // Cancel any pending GTC sell before redeeming — otherwise
+                            // the sell order would try to fill after tokens are redeemed.
+                            if let Some(ref oid) = sell_order_id {
+                                if let Err(e) = executor.cancel_order(oid).await {
+                                    warn!("⚠️  Could not cancel sell order {} before redeem: {}", oid, e);
+                                } else {
+                                    info!("🗑️  Cancelled sell order {} — falling back to redemption", oid);
+                                }
+                            }
                             let r = run_background_redeem(
                                 &config, &condition_id, &up_token_id, &down_token_id,
                                 swept_side, neg_risk, tokens, cost, &slug, &executor,
@@ -1001,7 +1104,16 @@ impl OracleEngine {
             let neg_risk = pos.market.neg_risk;
             let tokens = pos.tokens_bought;
             let cost = pos.cost_usdc;
+            let sell_order_id = pos.sell_order_id.clone();
             tokio::spawn(async move {
+                // Cancel any pending GTC sell before redeeming
+                if let Some(ref oid) = sell_order_id {
+                    if let Err(e) = executor.cancel_order(oid).await {
+                        warn!("⚠️  Could not cancel sell order {} before redeem: {}", oid, e);
+                    } else {
+                        info!("🗑️  Cancelled sell order {} — falling back to redemption", oid);
+                    }
+                }
                 // Brief delay for on-chain settlement
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let r = run_background_redeem(
@@ -1332,6 +1444,7 @@ async fn submit_sweep_orders(
             orders_ok: 0, orders_count,
             total_elapsed_ms: exec_start.elapsed().as_secs_f64() * 1000.0,
             error: Some("All signing failed".to_string()),
+            sell_order_id: None,
         };
     }
 
@@ -1468,6 +1581,7 @@ async fn submit_sweep_orders(
         tokens_total, cost_total, orders_ok, orders_count,
         total_elapsed_ms,
         error: None,
+        sell_order_id: None,
     }
 }
 

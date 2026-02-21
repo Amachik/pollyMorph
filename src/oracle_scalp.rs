@@ -1561,13 +1561,12 @@ async fn run_background_redeem(
 
     // --- Fetch relay payload (nonce + relay address) ---
     let http_client = reqwest::Client::new();
-    // The relayer expects the PROXY wallet address + type "PROXY" (uppercase).
-    // SDK reference: relayClient.getRelayPayload(from, "PROXY")
-    let proxy_address = config.polymarket.proxy_address.to_lowercase();
+    // SDK calls getRelayPayload(from, "PROXY") where from = EOA signer address.
+    // NOT the proxy wallet address — confirmed in client.ts executeProxyTransactions().
     let relay_payload: serde_json::Value = match async {
         let r = http_client
             .get(format!("{}/relay-payload", relayer_url))
-            .query(&[("address", proxy_address.as_str()), ("type", "PROXY")])
+            .query(&[("address", eoa.as_str()), ("type", "PROXY")])
             .send().await?;
         r.json::<serde_json::Value>().await
     }.await
@@ -1579,6 +1578,7 @@ async fn run_background_redeem(
             error: Some(format!("relay-payload fetch failed: {}", e)),
         },
     };
+    debug!("   📦 relay-payload response: {}", relay_payload);
 
     let nonce = match relay_payload.get("nonce") {
         Some(v) => {
@@ -1680,6 +1680,7 @@ async fn run_background_redeem(
     let timestamp = chrono::Utc::now().timestamp(); // seconds, not millis — SDK uses Math.floor(Date.now()/1000)
     let timestamp_str = timestamp.to_string();
     let body_str = request_body.to_string();
+    debug!("   📤 Relayer request body: {}", body_str);
     let hmac_msg = format!("{}{}{}{}", timestamp_str, "POST", "/submit", body_str);
     use base64::Engine as _;
     // Use builder-specific credentials (from polymarket.com/settings?tab=builder)

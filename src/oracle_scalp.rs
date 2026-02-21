@@ -35,19 +35,19 @@ const ENTRY_WINDOW_SECS: i64 = 180;  // Start watching in final 3 min
 const MIN_SECS_REMAINING: i64 = 3;   // Enter as late as 3s before lock — stale asks exist until the last second
 const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
-const MAX_SWEEP_PRICE: f64 = 0.90;   // Buy cap: sweep stale asks up to 90¢
+const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: sweep asks up to 93¢
 const EXIT_SELL_PRICE: f64 = 0.98;   // GTC sell — fallback if we enter early; at P=0.99 we redeem at $1.00
 // STRATEGY: Terminal value sniping — identical to 0x1979ae6B
 // Wait until final seconds when P(win) is near-certain (0.97+).
-// Chainlink price is already above/below strike. Stale market maker asks
-// haven't been cancelled yet. Sweep them for near risk-free profit.
+// Chainlink price is already above/below strike. Market has repriced
+// to 0.91-0.93 range — sweep those asks for positive EV profit.
 //
 // EV math (fee-adjusted): fee = C * feeRate * (p*(1-p))^1
-// At p=0.90: fee = 0.90 * 0.10 * (0.90*0.10) = $0.0081/token
-// Cost at ask=0.90: $0.90 + $0.0081 = $0.9081
-// EV at P(win)=0.97: $0.97 - $0.9081 = +$0.062/token
-// Loss rate: ~3% (vs 15% at P=0.85) — near risk-free
-// Depth: thin (5-50 tokens) but MULTIPLE markets fire simultaneously
+// At p=0.93: fee = 0.93 * 0.10 * (0.93*0.07) = $0.0061/token
+// Cost at ask=0.93: $0.93 + $0.0061 = $0.9361
+// EV at P(win)=0.97: $0.97 - $0.9361 = +$0.034/token
+// Loss rate: ~3% — near risk-free
+// Depth: 3-11 tokens per signal but fills actually execute now
 // Volume = many markets * many signals, not depth per signal
 const FAIR_VALUE_THRESHOLD: f64 = 0.97; // P(win) >= 97%: near-certain outcome
 const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: stale ask is at least 4¢ below fair value

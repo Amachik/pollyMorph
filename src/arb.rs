@@ -2693,10 +2693,14 @@ pub async fn run_book_watcher(
                     let mut failed = false;
                     for chunk in pending_subs.chunks(WS_SUB_BATCH_SIZE) {
                         let sub_msg = if sent == 0 {
-                            // First batch uses "type": "market" for initial connection
+                            // First batch uses "type": "market" for initial connection.
+                            // custom_feature_enabled: true is REQUIRED to receive
+                            // market_resolved, best_bid_ask, and new_market events.
+                            // Without it the server never sends market_resolved.
                             serde_json::json!({
                                 "assets_ids": chunk,
-                                "type": "market"
+                                "type": "market",
+                                "custom_feature_enabled": true
                             })
                         } else {
                             // Subsequent batches use "operation": "subscribe"

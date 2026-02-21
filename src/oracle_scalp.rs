@@ -723,10 +723,12 @@ impl OracleEngine {
         let market_id = MarketId { token_id: token_hash, condition_id: [0u8; 32] };
         let neg_risk = market.neg_risk;
 
-        // Send ONE FAK order at the actual sweep_price (highest ask level we'd fill).
-        // Using a dynamic price instead of a hardcoded cap prevents FAK kills when
-        // the book has moved above the old 0.97 ceiling.
-        let price_cap = sweep_price.min(MAX_SWEEP_PRICE);
+        // Send ONE FAK at MAX_SWEEP_PRICE (hard cap). A FAK fills at the current
+        // best ask up to the limit price, so using the stale REST snapshot price
+        // causes "no orders found" kills when the book moves between snapshot and
+        // order submission. Using the hard cap (0.93) ensures we fill at whatever
+        // the live ask is, as long as it's within our margin.
+        let price_cap = MAX_SWEEP_PRICE;
         let sz_rounded = (total_tokens * 10000.0).round() / 10000.0;
         let actual_cost = sz_rounded * price_cap; // worst-case cost reservation
         let actual_cost = actual_cost.min(available * MAX_CAPITAL_FRACTION);

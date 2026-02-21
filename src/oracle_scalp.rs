@@ -345,9 +345,13 @@ impl OracleEngine {
     }
 
     /// Ingest the latest Chainlink price for an asset, updating the vol ring buffer.
+    /// Only records a new sample when the price has actually changed (Chainlink aggregator
+    /// only updates on >0.5% deviation, so duplicate prices must be skipped).
     fn update_chainlink_vol(&mut self, asset: ArbAsset, price: f64) {
         let last = self.last_chainlink_price.get(&asset).copied();
         if let Some(prev) = last {
+            // Skip if price unchanged — aggregator hasn't ticked yet
+            if (price - prev).abs() < 1e-8 { return; }
             if prev > 0.0 && price > 0.0 {
                 let log_ret = (price / prev).ln();
                 let samples = self.vol_samples.entry(asset).or_insert_with(VecDeque::new);
@@ -362,20 +366,30 @@ impl OracleEngine {
     }
 
     /// Annualised realized volatility from Chainlink log returns.
+    /// Uses actual elapsed time between samples (not a fixed interval) because the
+    /// Chainlink aggregator only updates on price deviation — intervals vary 7-25s.
     /// Returns a sensible default if insufficient data.
     fn realized_vol(&self, asset: ArbAsset) -> f64 {
         let samples = match self.vol_samples.get(&asset) {
             Some(s) if s.len() >= 3 => s,
             _ => return self.default_vol(asset),
         };
+        // Compute average interval between consecutive samples
+        let instants: Vec<std::time::Instant> = samples.iter().map(|(t, _)| *t).collect();
+        let avg_interval_secs = if instants.len() >= 2 {
+            let total_secs = instants.last().unwrap().duration_since(*instants.first().unwrap()).as_secs_f64();
+            (total_secs / (instants.len() - 1) as f64).max(1.0)
+        } else {
+            10.0 // fallback
+        };
         let returns: Vec<f64> = samples.iter().map(|(_, r)| *r).collect();
         let mean = returns.iter().sum::<f64>() / returns.len() as f64;
         let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
             / (returns.len() - 1) as f64;
         let std_per_sample = variance.sqrt();
-        // Samples arrive ~every 3s; annualise: σ_annual = σ_sample * sqrt(365*24*3600/3)
-        let annualised = std_per_sample * (365.0 * 24.0 * 3600.0_f64 / 3.0).sqrt();
-        annualised.clamp(0.20, 5.0) // clamp to sane range
+        // Annualise using actual sample interval
+        let annualised = std_per_sample * (365.25 * 24.0 * 3600.0 / avg_interval_secs).sqrt();
+        annualised.clamp(0.20, 5.0)
     }
 
     fn default_vol(&self, asset: ArbAsset) -> f64 {
@@ -658,23 +672,26 @@ impl OracleEngine {
             }
         }
 
-        // Record strike price for markets entering the entry window for the first time.
-        // The strike = Chainlink price at window start (used for fair value calculation).
-        let slugs_needing_strike: Vec<String> = markets_needing_books.iter()
-            .filter(|m| {
-                let secs_left = m.event_end_ts - now_ts;
-                secs_left > 0 && secs_left <= ENTRY_WINDOW_SECS
-            })
-            .filter(|m| m.strike_price == 0.0)
+        // Record strike price for newly tracked markets that don't have one yet.
+        // Strike = Chainlink price at event_start_ts (candle open), which is what
+        // Polymarket uses to resolve: price_at_end >= price_at_start -> Up.
+        // We record it as soon as Chainlink data is available after market discovery.
+        // For markets already past start (mid-candle), we use the current price as
+        // best approximation if we don't have a recorded strike yet.
+        let slugs_needing_strike: Vec<String> = self.tracked_markets.values()
+            .filter(|m| m.strike_price == 0.0 && m.event_end_ts > now_ts)
             .map(|m| m.event_slug.clone())
             .collect();
         for slug in slugs_needing_strike {
             if let Some(market) = self.tracked_markets.get_mut(&slug) {
                 let cl_asset = Self::chainlink_asset_for(market.asset);
-                if let Some(price) = self.chainlink_prices.fresh_price(cl_asset, 60) {
+                // Accept price up to 120s stale — we just need the candle-open price
+                if let Some(price) = self.chainlink_prices.fresh_price(cl_asset, 120) {
                     market.strike_price = price;
-                    info!("⛓️  Strike recorded: {} | K=${:.4} ({}s left)",
-                          market.title, price, market.event_end_ts - now_ts);
+                    let secs_into_candle = now_ts - market.event_start_ts;
+                    let secs_left = market.event_end_ts - now_ts;
+                    info!("⛓️  Strike recorded: {} | K=${:.4} | {}s into candle | {}s left",
+                          market.title, price, secs_into_candle, secs_left);
                 }
             }
         }

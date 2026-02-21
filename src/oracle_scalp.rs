@@ -798,7 +798,7 @@ impl OracleEngine {
                 market_id,
                 side: Side::Sell,
                 price: Decimal::from_f64_retain(EXIT_SELL_PRICE).unwrap_or(Decimal::new(97, 2)),
-                size: Decimal::from_f64_retain((result.tokens_total * 10000.0).round() / 10000.0)
+                size: Decimal::from_f64_retain((result.tokens_total * 100.0).floor() / 100.0)
                     .unwrap_or(Decimal::new(1, 0)),
                 order_type: OrderType::GoodTilCancelled,
                 urgency: SignalUrgency::High,

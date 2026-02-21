@@ -754,6 +754,7 @@ impl OracleEngine {
     }
 
     fn handle_redeem_result(&mut self, result: RedeemResult) {
+        // Always remove from executing_slugs so check_and_redeem can retry after cooldown.
         self.executing_slugs.remove(&result.event_slug);
         if let Some(ref err) = result.error {
             warn!("❌ Redeem failed for {}: {}", result.event_slug, err);
@@ -947,12 +948,17 @@ impl OracleEngine {
             Some(s) => s.clone(),
             None => return,
         };
-        if self.executing_slugs.contains(&event_slug) { return; }
+        // Insert BEFORE checking won/lost so duplicate WS events for the same market
+        // (one per token side) are deduplicated — the second call returns here.
+        if !self.executing_slugs.insert(event_slug.clone()) { return; }
         let pos = match self.positions.iter().find(
             |p| p.market.event_slug == event_slug && !p.redeemed
         ) {
             Some(p) => p.clone(),
-            None => return,
+            None => {
+                self.executing_slugs.remove(&event_slug);
+                return;
+            }
         };
         let won = matches!(
             (pos.swept_side, winning_outcome),
@@ -964,7 +970,6 @@ impl OracleEngine {
               if won { "WON ✅" } else { "LOST ❌" });
 
         if won {
-            self.executing_slugs.insert(event_slug.clone());
             let redeem_tx = self.redeem_tx.clone();
             let config = self.config.clone();
             let executor = self.executor.clone();

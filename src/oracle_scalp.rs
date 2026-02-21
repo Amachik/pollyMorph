@@ -37,12 +37,12 @@ const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
 const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: don't pay more than 93¢ (5¢ margin to sell at 0.98)
 const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy from us at 0.98
-const FAIR_VALUE_THRESHOLD: f64 = 0.75; // Chainlink model: only enter when P(win) >= 75%
-const EDGE_THRESHOLD: f64 = 0.02;    // Chainlink model: require fair_value - ask >= 2¢ edge
+const FAIR_VALUE_THRESHOLD: f64 = 0.80; // Chainlink model: only enter when P(win) >= 80%
+const EDGE_THRESHOLD: f64 = -0.05;   // Chainlink model: allow up to 5¢ overpay vs fair value (profit comes from $1 redemption)
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade
-const BET_MIN_USDC: f64 = 1.0;         // Never bet less than $1 (below CLOB minimum)
+const BET_MIN_USDC: f64 = 5.0;         // Never bet less than $5 — min_size=5 tokens at ~$0.93 = $4.65 minimum
 const BET_MAX_USDC: f64 = 25.0;        // Never bet more than $25 per trade
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 1.0;   // CLOB minimum ~1 token; sizing is dynamic based on balance
@@ -672,21 +672,23 @@ impl OracleEngine {
             }
         }
 
-        // Record strike price for newly tracked markets that don't have one yet.
-        // Strike = Chainlink price at event_start_ts (candle open), which is what
-        // Polymarket uses to resolve: price_at_end >= price_at_start -> Up.
-        // We record it as soon as Chainlink data is available after market discovery.
-        // For markets already past start (mid-candle), we use the current price as
-        // best approximation if we don't have a recorded strike yet.
+        // Record strike price for markets that have started but don't have a strike yet.
+        // Strike = Chainlink price at event_start_ts (candle open).
+        // CRITICAL: only record AFTER event_start_ts — the candle hasn't opened yet before that.
+        // Markets are discovered up to PRE_MARKET_LEAD_SECS=300s before start, so we must wait.
         let slugs_needing_strike: Vec<String> = self.tracked_markets.values()
-            .filter(|m| m.strike_price == 0.0 && m.event_end_ts > now_ts)
+            .filter(|m| {
+                m.strike_price == 0.0
+                    && m.event_end_ts > now_ts
+                    && now_ts >= m.event_start_ts  // candle has opened
+            })
             .map(|m| m.event_slug.clone())
             .collect();
         for slug in slugs_needing_strike {
             if let Some(market) = self.tracked_markets.get_mut(&slug) {
                 let cl_asset = Self::chainlink_asset_for(market.asset);
-                // Accept price up to 120s stale — we just need the candle-open price
-                if let Some(price) = self.chainlink_prices.fresh_price(cl_asset, 120) {
+                // Accept price up to 60s stale — we want the price close to candle open
+                if let Some(price) = self.chainlink_prices.fresh_price(cl_asset, 60) {
                     market.strike_price = price;
                     let secs_into_candle = now_ts - market.event_start_ts;
                     let secs_left = market.event_end_ts - now_ts;

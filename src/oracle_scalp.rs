@@ -36,7 +36,9 @@ const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other s
 const MAX_SWEEP_PRICE: f64 = 0.97;   // Fee ceiling: Poly fee ~2%*min(p,1-p) → at 0.97 fee≈0.6%, profit $0.024/token
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
-const MAX_SINGLE_BET_USDC: f64 = 5.0;  // Hard cap per trade — never risk more than $5 on one bet
+const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade
+const BET_MIN_USDC: f64 = 1.0;         // Never bet less than $1 (below CLOB minimum)
+const BET_MAX_USDC: f64 = 25.0;        // Never bet more than $25 per trade
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 1.0;   // CLOB minimum ~1 token; sizing is dynamic based on balance
 const MARKET_SCAN_INTERVAL_SECS: u64 = 10;
@@ -610,7 +612,10 @@ impl OracleEngine {
     /// sweep_price is the highest ask level we'd fill against (used as FAK limit price).
     fn compute_sweep(&self, book: &TokenBook) -> (f64, f64, f64) {
         if book.ask_levels.is_empty() { return (0.0, 0.0, MAX_SWEEP_PRICE); }
-        let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION).min(MAX_SINGLE_BET_USDC);
+        let bet_size = (self.capital_usdc * BET_FRACTION)
+            .max(BET_MIN_USDC)
+            .min(BET_MAX_USDC);
+        let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION).min(bet_size);
         let mut tokens = 0.0_f64;
         let mut cost = 0.0_f64;
         let mut sweep_price = book.best_ask.max(book.ask_levels[0].price);

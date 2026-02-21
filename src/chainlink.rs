@@ -18,8 +18,14 @@ const ETH_USD_ADDR: &str  = "0xF9680D99D6C9589e2a93a78A04A279e509205945";
 const SOL_USD_ADDR: &str  = "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC";
 const XRP_USD_ADDR: &str  = "0x785ba89291f676b5386652eB12b30cF361020694";
 
-/// Public Polygon RPC — polygon.llamarpc.com is 3.9ms from Amsterdam VPS (vs 112ms for 1rpc.io/matic)
-const POLYGON_RPC: &str = "https://polygon.llamarpc.com";
+/// Polygon RPC endpoints in priority order (fastest first from Amsterdam VPS).
+/// Falls back to next on failure — polygon.llamarpc.com is 3.9ms but may block eth_call.
+const POLYGON_RPCS: &[&str] = &[
+    "https://polygon.llamarpc.com",
+    "https://polygon-rpc.com",
+    "https://rpc.ankr.com/polygon",
+    "https://1rpc.io/matic",
+];
 
 /// `latestRoundData()` selector
 const LATEST_ROUND_DATA_SELECTOR: &str = "0xfeaf968c";
@@ -117,6 +123,7 @@ fn parse_latest_round_data(hex: &str) -> Option<(f64, i64)> {
 }
 
 /// Fetch the latest price for a single asset via JSON-RPC `eth_call`.
+/// Tries each RPC in POLYGON_RPCS order, returns first successful result.
 async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset) -> Option<PriceSample> {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
@@ -128,21 +135,45 @@ async fn fetch_price(client: &reqwest::Client, asset: ChainlinkAsset) -> Option<
         "id": 1
     });
 
-    let resp = client
-        .post(POLYGON_RPC)
-        .json(&payload)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .ok()?;
+    for rpc in POLYGON_RPCS {
+        let resp = match client
+            .post(*rpc)
+            .json(&payload)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
 
-    let json: serde_json::Value = resp.json().await.ok()?;
-    let result = json.get("result")?.as_str()?;
-    let (price, updated_at) = parse_latest_round_data(result)?;
+        let json: serde_json::Value = match resp.json().await {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
 
-    if price <= 0.0 { return None; }
+        // Skip RPC errors (e.g. rate limit, method not supported)
+        if json.get("error").is_some() {
+            debug!("⛓️  {} eth_call error from {}: {:?}", asset.label(), rpc, json["error"]);
+            continue;
+        }
 
-    Some(PriceSample { price, updated_at, fetched_at: Instant::now() })
+        let result = match json.get("result").and_then(|v| v.as_str()) {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let (price, updated_at) = match parse_latest_round_data(result) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if price <= 0.0 { continue; }
+
+        return Some(PriceSample { price, updated_at, fetched_at: Instant::now() });
+    }
+
+    None
 }
 
 /// Background task: polls all 4 Chainlink feeds every POLL_INTERVAL_MS.

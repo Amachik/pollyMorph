@@ -37,10 +37,13 @@ const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
 const MAX_SWEEP_PRICE: f64 = 0.92;   // Buy cap: don't pay more than 92¢
 const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy from us at 0.98
-// EV math: profit = P(win)*$1.00 - ask. For positive EV at ask=0.92: need P(win) > 0.92.
-// Set threshold to 0.94 to require clear positive EV margin.
-const FAIR_VALUE_THRESHOLD: f64 = 0.94; // Only enter when P(win) >= 94% (clear positive EV at ask<=0.92)
-const EDGE_THRESHOLD: f64 = 0.02;    // Require fair_value - ask >= 2¢ (buying underpriced tokens)
+// EV math (fee-adjusted): profit = P(win)*$1.00 - ask*(1+fee_rate)
+// Polymarket taker fee at p=0.92: fee = 10% * 2 * min(0.92,0.08) = 1.6%
+// Cost per token = ask * 1.016 = 0.92 * 1.016 = 0.9347
+// For positive EV: P(win) > 0.9347. Set threshold to 0.96 for clear margin.
+// EDGE_THRESHOLD must cover fee drag: fee ~= 0.015 at ask=0.92, so need edge >= 0.035
+const FAIR_VALUE_THRESHOLD: f64 = 0.96; // P(win) >= 96%: EV = 0.96 - 0.9347 = +$0.025/token after fees
+const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: covers 1.6% fee drag + 2.4¢ net edge
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 10_000.0;    // Hard ceiling — never risk more than $10k in one trade
 const BET_FRACTION: f64 = 0.40;        // Bet 40% of available capital per trade

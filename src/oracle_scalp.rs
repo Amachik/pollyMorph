@@ -1466,8 +1466,10 @@ async fn run_background_redeem(
 
     info!("   🔄 [BG] Redeeming {:.0} tokens for {} via relayer", tokens, event_slug);
 
-    // --- Build redeemPositions calldata ---
-    // CTF contract: 0x4D97DcD97Ec945F40CF65F87097aCe5EA0476045 (embedded in calldata via ABI encode)
+    // --- Build redeemPositions calldata (inner call) ---
+    // The CTF exchange contract holds the conditional tokens and handles redemption.
+    let ctf_address: Address = "0x4D97DcD97Ec945F40CF65F87097aCe5EA0476045"
+        .parse().expect("CTF address");
     let usdc_e: Address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         .parse().expect("USDC address");
 
@@ -1481,10 +1483,11 @@ async fn run_background_redeem(
     };
     let parent_collection = [0u8; 32];
 
-    let fn_selector = &ethers::core::utils::keccak256(
+    // Inner calldata: redeemPositions(collateral, parentCollection, conditionId, indexSets)
+    let redeem_selector = &ethers::core::utils::keccak256(
         b"redeemPositions(address,bytes32,bytes32,uint256[])"
     )[..4];
-    let encoded_params = ethers::abi::encode(&[
+    let redeem_params = ethers::abi::encode(&[
         ethers::abi::Token::Address(usdc_e),
         ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
         ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
@@ -1493,17 +1496,15 @@ async fn run_background_redeem(
             ethers::abi::Token::Uint(U256::from(2u64)),
         ]),
     ]);
-    let mut calldata = fn_selector.to_vec();
-    calldata.extend_from_slice(&encoded_params);
-    let calldata_hex = format!("0x{}", hex::encode(&calldata));
+    let mut inner_calldata = redeem_selector.to_vec();
+    inner_calldata.extend_from_slice(&redeem_params);
 
     // --- Proxy transaction constants (Polygon mainnet) ---
     // Source: https://github.com/Polymarket/builder-relayer-client/blob/main/src/config/index.ts
     let proxy_factory = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
     let relay_hub     = "0xD216153c06E857cD7f72665E0aF1d7D82172F494";
-    let relayer_url   = "https://relayer-v2.polymarket.com";
 
-    // --- Parse EOA wallet for signing ---
+    // --- Parse EOA wallet for signing (needed for eoa address before CREATE2 derivation) ---
     let wallet: LocalWallet = match config.polymarket.private_key.parse::<LocalWallet>() {
         Ok(w) => w.with_chain_id(137u64),
         Err(e) => return RedeemResult {
@@ -1513,6 +1514,50 @@ async fn run_background_redeem(
         },
     };
     let eoa = format!("{:?}", wallet.address()); // "0x..." lowercase
+
+    // --- Derive proxyWallet via CREATE2 (matches SDK's deriveProxyWallet) ---
+    // PROXY_INIT_CODE_HASH from @polymarket/builder-relayer-client constants/index.js
+    let proxy_init_code_hash = hex::decode(
+        "d21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
+    ).expect("valid hash");
+    // salt = keccak256(abi.encodePacked(address(eoa)))
+    // encodePacked(address) = left-padded 32 bytes (12 zero bytes + 20 address bytes)
+    let eoa_addr_bytes = hex::decode(eoa.trim_start_matches("0x")).unwrap_or_default();
+    let mut salt_preimage = vec![0u8; 12];
+    salt_preimage.extend_from_slice(&eoa_addr_bytes);
+    let salt = ethers::core::utils::keccak256(&salt_preimage);
+    // CREATE2: keccak256(0xff ++ factory ++ salt ++ initCodeHash)[12..]
+    let factory_bytes = hex::decode(proxy_factory.trim_start_matches("0x")).unwrap_or_default();
+    let mut create2_preimage = vec![0xffu8];
+    create2_preimage.extend_from_slice(&factory_bytes);
+    create2_preimage.extend_from_slice(&salt);
+    create2_preimage.extend_from_slice(&proxy_init_code_hash);
+    let create2_hash = ethers::core::utils::keccak256(&create2_preimage);
+    let derived_proxy = format!("0x{}", hex::encode(&create2_hash[12..]));
+    debug!("   🏦 Derived proxyWallet: {} (config: {})", derived_proxy, config.polymarket.proxy_address);
+
+    // --- Wrap inner calldata in proxy(calls[]) as required by the proxy wallet factory ---
+    // ABI: proxy((uint8 typeCode, address to, uint256 value, bytes data)[])
+    // CallType.Call = 0
+    // Source: @polymarket/builder-relayer-client encode/proxy.js + abis/proxyFactory.js
+    let proxy_fn_selector = &ethers::core::utils::keccak256(
+        b"proxy((uint8,address,uint256,bytes)[])"
+    )[..4];
+    // ABI-encode the calls array: one element {typeCode=0, to=ctf_address, value=0, data=inner_calldata}
+    let encoded_proxy_params = ethers::abi::encode(&[
+        ethers::abi::Token::Array(vec![
+            ethers::abi::Token::Tuple(vec![
+                ethers::abi::Token::Uint(U256::zero()),           // typeCode = 0 (Call)
+                ethers::abi::Token::Address(ctf_address),         // to = CTF contract
+                ethers::abi::Token::Uint(U256::zero()),           // value = 0
+                ethers::abi::Token::Bytes(inner_calldata.clone()), // data = redeemPositions calldata
+            ]),
+        ]),
+    ]);
+    let mut calldata = proxy_fn_selector.to_vec();
+    calldata.extend_from_slice(&encoded_proxy_params);
+    let calldata_hex = format!("0x{}", hex::encode(&calldata));
+    let relayer_url   = "https://relayer-v2.polymarket.com";
 
     // --- Fetch relay payload (nonce + relay address) ---
     let http_client = reqwest::Client::new();
@@ -1617,7 +1662,7 @@ async fn run_background_redeem(
         "type": "PROXY",
         "from": eoa,
         "to": proxy_factory,
-        "proxyWallet": proxy_address,  // lowercase, matches relay-payload address query
+        "proxyWallet": derived_proxy,  // CREATE2-derived, matches SDK's deriveProxyWallet()
         "data": calldata_hex,
         "nonce": nonce,
         "signature": signature,

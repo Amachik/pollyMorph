@@ -317,6 +317,57 @@ impl OracleEngine {
         info!("   Strategy: Sweep winning side in final {}s of 15m markets", ENTRY_WINDOW_SECS);
         info!("   Max bet: ${:.0} | Win bid >= {:.2} | Lose bid <= {:.2} | Sweep <= {:.2}", MAX_BET_USDC, MIN_WINNING_BID, MAX_LOSING_BID, MAX_SWEEP_PRICE);
 
+        // Startup reconciliation: drop any recovered positions whose tokens are no
+        // longer held on-chain (manually claimed, redeemed externally, or already settled).
+        // This prevents phantom positions from persisting across restarts.
+        if !self.positions.is_empty() {
+            let addr = self.executor.wallet_address().to_string();
+            let url = format!(
+                "https://data-api.polymarket.com/positions?user={}&sizeThreshold=0.1",
+                addr
+            );
+            match self.client.get(&url).send().await {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(val) = r.json::<serde_json::Value>().await {
+                        let arr = val.as_array()
+                            .or_else(|| val.get("data").and_then(|d| d.as_array()));
+                        if let Some(positions) = arr {
+                            let held: HashSet<String> = positions.iter()
+                                .filter_map(|p| {
+                                    if p["size"].as_f64().unwrap_or(0.0) > 0.1 {
+                                        p["asset"].as_str().map(|s| s.to_string())
+                                    } else { None }
+                                }).collect();
+                            let before = self.positions.len();
+                            self.positions.retain(|p| {
+                                let token_id = match p.swept_side {
+                                    SweptSide::Up   => &p.market.up_token_id,
+                                    SweptSide::Down => &p.market.down_token_id,
+                                };
+                                let still_held = held.contains(token_id);
+                                if !still_held {
+                                    info!("🧹 Startup: dropping stale position {} (tokens not held on-chain — manually claimed?)",
+                                          p.market.event_slug);
+                                    // Refund capital since tokens are gone and we can't redeem
+                                    // (on-chain balance will reflect actual state after refresh)
+                                }
+                                still_held
+                            });
+                            let dropped = before - self.positions.len();
+                            if dropped > 0 {
+                                self.needs_balance_refresh = true;
+                                save_positions(&self.positions);
+                                info!("🧹 Startup reconciliation: dropped {} stale position(s)", dropped);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    warn!("⚠️  Startup reconciliation: data-api unreachable, keeping all recovered positions");
+                }
+            }
+        }
+
         if !self.ws_subscribed.is_empty() {
             let ids: Vec<String> = self.ws_subscribed.iter().cloned().collect();
             info!("💾 Re-subscribing {} recovered asset IDs", ids.len());

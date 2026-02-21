@@ -431,22 +431,28 @@ impl OrderSigner {
     /// `price` is the probability price (e.g. 0.55).
     #[inline(always)]
     fn calculate_amounts(&self, side: Side, price: Decimal, size: Decimal) -> (U256, U256) {
-        // Polymarket precision rules:
-        //   makerAmount (USDC): max 2 decimal places (nearest cent) → round to 2dp before scaling
-        //   takerAmount (tokens): max 4 decimal places → round to 4dp before scaling
-        let size_4dp = size.round_dp(4);
-        let notional_2dp = (size * price).round_dp(2);
+        // Polymarket CLOB precision rules (confirmed from API error messages):
+        //
+        //   BUY:  makerAmount = USDC paid       → max 2 decimal places
+        //         takerAmount = tokens received  → max 4 decimal places
+        //
+        //   SELL: makerAmount = tokens paid      → max 2 decimal places
+        //         takerAmount = USDC received    → max 4 decimal places
+        //
+        // Both sides: maker=2dp, taker=4dp.
+        let size_2dp = size.round_dp(2);
+        let notional_4dp = (size_2dp * price).round_dp(4);
 
-        let size_tokens = Self::to_token_decimals(size_4dp);
-        let notional = Self::to_token_decimals(notional_2dp);
+        let size_tokens = Self::to_token_decimals(size_2dp);
+        let notional = Self::to_token_decimals(notional_4dp);
 
         match side {
             Side::Buy => {
-                // BUY: pay USDC (maker=2dp), receive conditional tokens (taker=4dp)
+                // BUY: maker=USDC(2dp), taker=tokens(4dp)
                 (U256::from(notional), U256::from(size_tokens))
             }
             Side::Sell => {
-                // SELL: pay conditional tokens (maker=4dp), receive USDC (taker=2dp)
+                // SELL: maker=tokens(2dp), taker=USDC(4dp)
                 (U256::from(size_tokens), U256::from(notional))
             }
         }

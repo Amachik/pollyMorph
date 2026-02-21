@@ -209,8 +209,11 @@ impl OracleEngine {
     ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(5)
-            .tcp_nodelay(true)
+            .pool_max_idle_per_host(10)          // more idle connections for burst signals
+            .pool_idle_timeout(std::time::Duration::from_secs(90)) // keep connections warm
+            .tcp_keepalive(std::time::Duration::from_secs(30))     // OS-level TCP keepalive
+            .tcp_nodelay(true)                   // disable Nagle — send immediately
+            .connection_verbose(false)
             .user_agent("Mozilla/5.0")
             .build()
             .expect("Failed to create HTTP client");
@@ -504,6 +507,12 @@ impl OracleEngine {
         );
         book_poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut status_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        // Keepalive ping: send a cheap HEAD to CLOB every 30s to prevent TLS re-handshake.
+        // Without this, after 90s idle the pooled connection expires and the next order
+        // submission pays an extra ~68ms for TLS negotiation — fatal in the final seconds.
+        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        keepalive_interval.tick().await; // skip first immediate tick
 
         loop {
             tokio::select! {
@@ -550,6 +559,16 @@ impl OracleEngine {
                     self.reconcile_positions().await;
                     self.check_and_redeem().await;
                     self.discover_and_subscribe().await;
+                }
+                _ = keepalive_interval.tick() => {
+                    // Fire-and-forget HEAD ping to keep TLS connection warm
+                    let client = self.client.clone();
+                    let url = format!("{}/ok", self.config.polymarket.rest_url);
+                    tokio::spawn(async move {
+                        let _ = client.get(&url)
+                            .timeout(std::time::Duration::from_secs(3))
+                            .send().await;
+                    });
                 }
                 _ = status_interval.tick() => {
                     let deployed: f64 = self.positions.iter().map(|p| p.cost_usdc).sum();

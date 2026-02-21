@@ -527,6 +527,8 @@ impl OracleEngine {
         if self.executing_slugs.contains(&market.event_slug) { return; }
         // Block new sweeps while ANY sweep is in-flight — on-chain balance is shared
         if !self.executing_slugs.is_empty() { return; }
+        // Never sweep a market we already hold an unredeemed position in
+        if self.positions.iter().any(|p| p.market.event_slug == market.event_slug && !p.redeemed) { return; }
         // Per-market cooldown: allow re-sweep after RESWEEP_COOLDOWN_MS (not a permanent block)
         if let Some(last) = self.last_sweep_attempt.get(&market.event_slug) {
             if last.elapsed().as_millis() < RESWEEP_COOLDOWN_MS { return; }

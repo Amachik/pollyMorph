@@ -660,8 +660,13 @@ impl OracleEngine {
         // Require at least min_size tokens (CLOB minimum for GTC sell orders = 5).
         // A fill below this threshold can't be sold and must wait for redemption.
         if total_tokens < market.min_size as f64 {
-            debug!("⏳ {} — depth too thin: {:.1} tokens < min_size {:.0}",
-                   market.title, total_tokens, market.min_size);
+            let now_inst = std::time::Instant::now();
+            let last = self.last_debug_log.get(&market.event_slug).copied();
+            if last.map_or(true, |t| now_inst.duration_since(t).as_secs() >= 5) {
+                debug!("⏳ {} — depth too thin: {:.1} tokens < min_size {:.0}",
+                       market.title, total_tokens, market.min_size);
+                self.last_debug_log.insert(market.event_slug.clone(), now_inst);
+            }
             return;
         }
 
@@ -955,6 +960,7 @@ impl OracleEngine {
             return;
         }
         self.capital_usdc += result.usdc_recovered;
+        self.needs_balance_refresh = true;
         self.total_pnl += result.profit;
         self.sweeps_completed += 1;
         let sign = if result.profit >= 0.0 { "+" } else { "" };

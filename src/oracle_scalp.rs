@@ -31,22 +31,26 @@ use tracing::{info, warn, error, debug};
 // Constants
 // ---------------------------------------------------------------------------
 
-const ENTRY_WINDOW_SECS: i64 = 180;  // Enter in final 3 min — market direction is clear but sweep bots haven't arrived
-const MIN_SECS_REMAINING: i64 = 10;  // Don't enter in final 10s — not enough time for sell to route
+const ENTRY_WINDOW_SECS: i64 = 180;  // Start watching in final 3 min
+const MIN_SECS_REMAINING: i64 = 3;   // Enter as late as 3s before lock — stale asks exist until the last second
 const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
-const MAX_SWEEP_PRICE: f64 = 0.82;   // Buy cap: don't pay more than 82¢
-const EXIT_SELL_PRICE: f64 = 0.92;   // Sell limit: reachable as P(win) rises toward 1.0 in final 60s
-// EV math (fee-adjusted): profit = P(win)*$1.00 - ask*(1+fee_rate)
-// Polymarket taker fee formula: fee = C * feeRate * (p*(1-p))^1
-// At p=0.82: fee = 0.82 * 0.10 * (0.82*0.18) = $0.0121/token
-// Cost per token at ask=0.82: $0.82 + $0.0121 = $0.8321
-// EV (hold to redemption): 0.85*$1.00 - $0.8321 = +$0.0179/token
-// EV (sell exit at $0.92):  $0.92 - $0.8321 = +$0.0879/token (5x better if sell fills)
-// Risk: 15% chance of full loss if neither sell fills nor wins redemption
-// Key insight: depth at <=0.82 is 200-500 tokens vs 5-50 at <=0.92 -> fills full bet
-const FAIR_VALUE_THRESHOLD: f64 = 0.85; // P(win) >= 85%: clear directional conviction
-const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: covers fee drag + net edge
+const MAX_SWEEP_PRICE: f64 = 0.90;   // Buy cap: sweep stale asks up to 90¢
+const EXIT_SELL_PRICE: f64 = 0.98;   // GTC sell — fallback if we enter early; at P=0.99 we redeem at $1.00
+// STRATEGY: Terminal value sniping — identical to 0x1979ae6B
+// Wait until final seconds when P(win) is near-certain (0.97+).
+// Chainlink price is already above/below strike. Stale market maker asks
+// haven't been cancelled yet. Sweep them for near risk-free profit.
+//
+// EV math (fee-adjusted): fee = C * feeRate * (p*(1-p))^1
+// At p=0.90: fee = 0.90 * 0.10 * (0.90*0.10) = $0.0081/token
+// Cost at ask=0.90: $0.90 + $0.0081 = $0.9081
+// EV at P(win)=0.97: $0.97 - $0.9081 = +$0.062/token
+// Loss rate: ~3% (vs 15% at P=0.85) — near risk-free
+// Depth: thin (5-50 tokens) but MULTIPLE markets fire simultaneously
+// Volume = many markets * many signals, not depth per signal
+const FAIR_VALUE_THRESHOLD: f64 = 0.97; // P(win) >= 97%: near-certain outcome
+const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: stale ask is at least 4¢ below fair value
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 10_000.0;    // Hard ceiling — never risk more than $10k in one trade
 const BET_FRACTION: f64 = 0.40;        // Bet 40% of available capital per trade

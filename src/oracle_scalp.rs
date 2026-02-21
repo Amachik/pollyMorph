@@ -2225,8 +2225,10 @@ async fn run_background_redeem(
         "metadata": format!("redeem {}", event_slug),
     });
 
-    // Auth headers — same HMAC pattern as CLOB API
-    let timestamp = chrono::Utc::now().timestamp(); // seconds, not millis — SDK uses Math.floor(Date.now()/1000)
+    // Auth headers — builder relayer uses Date.now() (milliseconds), NOT seconds.
+    // The CLOB API uses seconds, but the builder-signing-sdk uses Date.now().toString()
+    // which is milliseconds. Using seconds causes HMAC auth rejection.
+    let timestamp = chrono::Utc::now().timestamp_millis();
     let timestamp_str = timestamp.to_string();
     let body_str = request_body.to_string();
     info!("   📤 Relayer request body: {}", body_str);

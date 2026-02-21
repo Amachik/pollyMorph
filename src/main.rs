@@ -97,6 +97,9 @@ async fn main() -> anyhow::Result<()> {
     info!("  - API secret loaded: {} chars", config.polymarket.api_secret.len());
     info!("  - API passphrase loaded: {} chars", config.polymarket.api_passphrase.len());
     info!("  - Private key loaded: {} chars", config.polymarket.private_key.len());
+    info!("  - Builder API key loaded: {} chars ({})",
+        config.polymarket.builder_api_key.len(),
+        if config.polymarket.builder_api_key == config.polymarket.api_key { "⚠️  same as CLOB key — set POLYMARKET_BUILDER_API_KEY" } else { "✅ separate builder key" });
     
     // Initialize runtime parameters (can be modified at runtime)
     let runtime_params = Arc::new(RuntimeParams::new(&config));

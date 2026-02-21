@@ -657,9 +657,11 @@ impl OracleEngine {
         let sz_rounded = (total_tokens * 10000.0).round() / 10000.0;
         let actual_cost = sz_rounded * price_cap; // worst-case cost reservation
         let actual_cost = actual_cost.min(available * MAX_CAPITAL_FRACTION);
+        // Enforce CLOB minimum of $1.00 — if capping by fraction drops us below $1, use full available
+        let actual_cost = if actual_cost < 1.0 && available >= 1.0 { available.min(available) } else { actual_cost };
         let sz_capped = actual_cost / price_cap;
         let sz_final = (sz_capped * 10000.0).round() / 10000.0;
-        if sz_final < MIN_ORDER_SIZE {
+        if sz_final < MIN_ORDER_SIZE || actual_cost < 1.0 {
             self.executing_slugs.remove(&market.event_slug);
             return;
         }
@@ -1624,19 +1626,24 @@ async fn run_background_redeem(
     let body_str = request_body.to_string();
     let hmac_msg = format!("{}{}{}{}", timestamp_str, "POST", "/submit", body_str);
     use base64::Engine as _;
-    // The secret is expected to be URL-safe base64 encoded
-    let secret_trimmed = config.polymarket.api_secret.trim();
-    let hmac_key = match base64::engine::general_purpose::URL_SAFE.decode(secret_trimmed) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return RedeemResult {
-                event_slug: event_slug.to_string(),
-                usdc_recovered: 0.0,
-                profit: 0.0,
-                error: Some(format!("Invalid builder API secret (base64 decode failed): {}", e)),
-            }
-        }
+    // Use builder-specific credentials (from polymarket.com/settings?tab=builder)
+    // These are DIFFERENT from CLOB L2 API credentials
+    let secret_trimmed = config.polymarket.builder_api_secret.trim();
+    let hmac_key = {
+        use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD, STANDARD_NO_PAD};
+        STANDARD.decode(secret_trimmed)
+            .or_else(|_| URL_SAFE.decode(secret_trimmed))
+            .or_else(|_| URL_SAFE_NO_PAD.decode(secret_trimmed))
+            .or_else(|_| STANDARD_NO_PAD.decode(secret_trimmed))
+            .unwrap_or_else(|_| {
+                // Last resort: treat as raw UTF-8 bytes
+                secret_trimmed.as_bytes().to_vec()
+            })
     };
+    debug!("   🔑 Relayer auth: key={} passphrase_len={} secret_decoded_len={}",
+        &config.polymarket.builder_api_key[..config.polymarket.builder_api_key.len().min(8)],
+        config.polymarket.builder_api_passphrase.len(),
+        hmac_key.len());
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     let mut mac = match <Hmac<Sha256> as Mac>::new_from_slice(&hmac_key) {
@@ -1658,9 +1665,9 @@ async fn run_background_redeem(
     let resp = http_client
         .post(format!("{}/submit", relayer_url))
         .header("Content-Type", "application/json")
-        .header("POLY_BUILDER_API_KEY", &config.polymarket.api_key)
+        .header("POLY_BUILDER_API_KEY", &config.polymarket.builder_api_key)
         .header("POLY_BUILDER_TIMESTAMP", &timestamp_str)
-        .header("POLY_BUILDER_PASSPHRASE", &config.polymarket.api_passphrase)
+        .header("POLY_BUILDER_PASSPHRASE", &config.polymarket.builder_api_passphrase)
         .header("POLY_BUILDER_SIGNATURE", &builder_sig)
         .body(body_str)
         .send().await;

@@ -41,6 +41,15 @@ pub struct PolymarketConfig {
     pub clob_address: String,
     /// Neg-risk CLOB contract address (neg-risk markets use a different exchange)
     pub neg_risk_clob_address: String,
+    /// Builder API key (from polymarket.com/settings?tab=builder) — used for relayer auth
+    /// Falls back to api_key if not set
+    pub builder_api_key: String,
+    /// Builder API secret (from polymarket.com/settings?tab=builder) — used for relayer HMAC
+    /// Falls back to api_secret if not set
+    pub builder_api_secret: String,
+    /// Builder API passphrase (from polymarket.com/settings?tab=builder) — used for relayer auth
+    /// Falls back to api_passphrase if not set
+    pub builder_api_passphrase: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -264,6 +273,19 @@ impl Config {
         env_fallback!(cfg.polymarket.private_key, "POLYMARKET_PRIVATE_KEY");
         env_fallback!(cfg.polymarket.proxy_address, "POLYMARKET_PROXY_ADDRESS");
         env_fallback!(cfg.polymarket.polygon_rpc, "POLYGON_RPC_URL");
+        env_fallback!(cfg.polymarket.builder_api_key, "POLYMARKET_BUILDER_API_KEY");
+        env_fallback!(cfg.polymarket.builder_api_secret, "POLYMARKET_BUILDER_API_SECRET");
+        env_fallback!(cfg.polymarket.builder_api_passphrase, "POLYMARKET_BUILDER_API_PASSPHRASE");
+        // Fall back to CLOB L2 credentials if builder-specific ones are not set
+        if cfg.polymarket.builder_api_key.is_empty() {
+            cfg.polymarket.builder_api_key = cfg.polymarket.api_key.clone();
+        }
+        if cfg.polymarket.builder_api_secret.is_empty() {
+            cfg.polymarket.builder_api_secret = cfg.polymarket.api_secret.clone();
+        }
+        if cfg.polymarket.builder_api_passphrase.is_empty() {
+            cfg.polymarket.builder_api_passphrase = cfg.polymarket.api_passphrase.clone();
+        }
         
         // REST URL: env var ALWAYS overrides TOML (needed for tunnel mode on VPS)
         // Unlike credentials, rest_url has a non-empty default in TOML, so the
@@ -290,6 +312,12 @@ impl Config {
                 api_passphrase: std::env::var("POLYMARKET_API_PASSPHRASE").unwrap_or_default(),
                 private_key: std::env::var("POLYMARKET_PRIVATE_KEY").unwrap_or_default(),
                 proxy_address: std::env::var("POLYMARKET_PROXY_ADDRESS").unwrap_or_default(),
+                builder_api_key: std::env::var("POLYMARKET_BUILDER_API_KEY")
+                    .unwrap_or_else(|_| std::env::var("POLYMARKET_API_KEY").unwrap_or_default()),
+                builder_api_secret: std::env::var("POLYMARKET_BUILDER_API_SECRET")
+                    .unwrap_or_else(|_| std::env::var("POLYMARKET_API_SECRET").unwrap_or_default()),
+                builder_api_passphrase: std::env::var("POLYMARKET_BUILDER_API_PASSPHRASE")
+                    .unwrap_or_else(|_| std::env::var("POLYMARKET_API_PASSPHRASE").unwrap_or_default()),
                 polygon_rpc: std::env::var("POLYGON_RPC_URL")
                     .unwrap_or_else(|_| "https://polygon-rpc.com".to_string()),
                 clob_address: std::env::var("CLOB_CONTRACT_ADDRESS")

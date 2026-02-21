@@ -1775,13 +1775,18 @@ async fn run_background_redeem(
         let parent_collection = [0u8; 32];
         // keccak256("redeemPositions(address,bytes32,bytes32,uint256[])")[..4] = 0x1ba2fc81
         let selector: &[u8] = &[0x1b, 0xa2, 0xfc, 0x81];
+        // indexSets: only the winning side. UP=1 (bit 0 set), DOWN=2 (bit 1 set).
+        // Passing [1,2] fails if we don't hold both outcome tokens.
+        let index_set = match swept_side {
+            SweptSide::Up   => U256::from(1u64),
+            SweptSide::Down => U256::from(2u64),
+        };
         let params = ethers::abi::encode(&[
             ethers::abi::Token::Address(usdc_e),
             ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
             ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
             ethers::abi::Token::Array(vec![
-                ethers::abi::Token::Uint(U256::from(1u64)),
-                ethers::abi::Token::Uint(U256::from(2u64)),
+                ethers::abi::Token::Uint(index_set),
             ]),
         ]);
         let mut cd = selector.to_vec();
@@ -1874,7 +1879,7 @@ async fn run_background_redeem(
             error: Some(format!("relay-payload fetch failed: {}", e)),
         },
     };
-    debug!("   📦 relay-payload response: {}", relay_payload);
+    info!("   📦 relay-payload response: {}", relay_payload);
 
     let nonce = match relay_payload.get("nonce") {
         Some(v) => {
@@ -1951,7 +1956,7 @@ async fn run_background_redeem(
             error: Some(format!("Signing failed: {}", e)),
         },
     };
-    debug!("   📝 Proxy struct_hash: 0x{} sig: {}", hex::encode(struct_hash), &signature[..20]);
+    info!("   📝 Proxy struct_hash: 0x{} sig: {}", hex::encode(struct_hash), &signature[..20]);
 
     // --- Build and submit the proxy transaction request ---
     let request_body = serde_json::json!({
@@ -1976,7 +1981,7 @@ async fn run_background_redeem(
     let timestamp = chrono::Utc::now().timestamp(); // seconds, not millis — SDK uses Math.floor(Date.now()/1000)
     let timestamp_str = timestamp.to_string();
     let body_str = request_body.to_string();
-    debug!("   📤 Relayer request body: {}", body_str);
+    info!("   📤 Relayer request body: {}", body_str);
     let hmac_msg = format!("{}{}{}{}", timestamp_str, "POST", "/submit", body_str);
     use base64::Engine as _;
     // Use builder-specific credentials (from polymarket.com/settings?tab=builder)
@@ -2091,7 +2096,7 @@ async fn run_background_redeem(
                     };
                 }
                 _ => {
-                    debug!("   ⏳ Relayer tx state: {} ({})", state, tx_id);
+                    info!("   ⏳ Relayer tx state: {} ({})", state, tx_id);
                 }
             }
         }

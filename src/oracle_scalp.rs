@@ -245,7 +245,16 @@ impl OracleEngine {
 
         let mut recovered = load_positions();
         let now_ts = chrono::Utc::now().timestamp();
-        recovered.retain(|p| p.market.event_end_ts > now_ts - 600);
+        // Keep positions for up to 24h after market end — needed for redemption.
+        // The old 10-min window was silently dropping positions that needed claiming.
+        let stale: Vec<_> = recovered.iter()
+            .filter(|p| p.market.event_end_ts <= now_ts - 86400)
+            .map(|p| p.market.event_slug.clone())
+            .collect();
+        for slug in &stale {
+            warn!("⚠️  Dropping stale position on load (>24h old): {}", slug);
+        }
+        recovered.retain(|p| p.market.event_end_ts > now_ts - 86400);
         let deployed: f64 = recovered.iter().map(|p| p.cost_usdc).sum();
         let adjusted_capital = (capital_usdc - deployed).max(0.0);
         if !recovered.is_empty() {

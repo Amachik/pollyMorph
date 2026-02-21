@@ -1467,38 +1467,72 @@ impl OracleEngine {
     }
 
     async fn check_market_resolution(&self, market: &ArbMarket) -> Result<Option<String>, String> {
-        let url = format!("https://gamma-api.polymarket.com/events/{}", market.event_id);
-        let resp = self.client.get(&url).send().await
-            .map_err(|e| format!("Resolution check error: {}", e))?;
-        if !resp.status().is_success() {
-            return Err(format!("Resolution API returned {}", resp.status()));
-        }
-        let event: serde_json::Value = resp.json().await
-            .map_err(|e| format!("Resolution JSON error: {}", e))?;
-        let markets = match event.get("markets").and_then(|v| v.as_array()) {
-            Some(m) => m,
-            None => return Ok(None),
-        };
-        if let Some(m) = markets.first() {
-            if !m.get("closed").and_then(|v| v.as_bool()).unwrap_or(false) {
-                return Ok(None);
+        // Helper: parse a field that may be a JSON-encoded string OR a native JSON array of strings.
+        fn parse_str_vec(v: &serde_json::Value) -> Vec<String> {
+            if let Some(arr) = v.as_array() {
+                // Native array: ["0", "1"] or ["Up", "Down"]
+                return arr.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect();
             }
-            let prices: Vec<String> = m.get("outcomePrices")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            let outcomes: Vec<String> = m.get("outcomes")
-                .and_then(|v| v.as_str())
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            for (i, p) in prices.iter().enumerate() {
-                if p.parse::<f64>().unwrap_or(0.0) > 0.99 {
-                    if let Some(o) = outcomes.get(i) {
-                        return Ok(Some(o.clone()));
+            if let Some(s) = v.as_str() {
+                // JSON-encoded string: "[\"0\",\"1\"]"
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(s) {
+                    return arr;
+                }
+            }
+            vec![]
+        }
+
+        // --- Primary: Gamma API ---
+        let url = format!("https://gamma-api.polymarket.com/events/{}", market.event_id);
+        if let Ok(resp) = self.client.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(event) = resp.json::<serde_json::Value>().await {
+                    if let Some(markets) = event.get("markets").and_then(|v| v.as_array()) {
+                        if let Some(m) = markets.first() {
+                            let closed = m.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if closed {
+                                let prices  = m.get("outcomePrices").map(parse_str_vec).unwrap_or_default();
+                                let outcomes = m.get("outcomes").map(parse_str_vec).unwrap_or_default();
+                                debug!("   Resolution Gamma: closed={} prices={:?} outcomes={:?}",
+                                       closed, prices, outcomes);
+                                for (i, p) in prices.iter().enumerate() {
+                                    if p.parse::<f64>().unwrap_or(0.0) > 0.99 {
+                                        if let Some(o) = outcomes.get(i) {
+                                            return Ok(Some(o.clone()));
+                                        }
+                                    }
+                                }
+                                // closed=true but no clear winner yet — keep retrying
+                                return Ok(None);
+                            }
+                        }
                     }
                 }
             }
         }
+
+        // --- Fallback: CLOB API (resolves faster than Gamma) ---
+        // GET /markets/{condition_id} returns {"question":"...","tokens":[{"outcome":"Up","winner":true},...],...}
+        let clob_url = format!("https://clob.polymarket.com/markets/{}", market.condition_id);
+        if let Ok(resp) = self.client.get(&clob_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(mkt) = resp.json::<serde_json::Value>().await {
+                    if let Some(tokens) = mkt.get("tokens").and_then(|v| v.as_array()) {
+                        for t in tokens {
+                            if t.get("winner").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                if let Some(outcome) = t.get("outcome").and_then(|v| v.as_str()) {
+                                    debug!("   Resolution CLOB fallback: winner={}", outcome);
+                                    return Ok(Some(outcome.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(None)
     }
 

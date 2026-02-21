@@ -1492,9 +1492,15 @@ async fn run_background_redeem(
         ethers::abi::Token::Address(usdc_e),
         ethers::abi::Token::FixedBytes(parent_collection.to_vec()),
         ethers::abi::Token::FixedBytes(condition_bytes.to_vec()),
+        // indexSets: only redeem the outcome we hold.
+        // UP token = index 0 → indexSet bit 0 → value 1 (binary 01)
+        // DOWN token = index 1 → indexSet bit 1 → value 2 (binary 10)
+        // Passing both [1,2] reverts because we have zero balance for the other side.
         ethers::abi::Token::Array(vec![
-            ethers::abi::Token::Uint(U256::from(1u64)),
-            ethers::abi::Token::Uint(U256::from(2u64)),
+            ethers::abi::Token::Uint(match swept_side {
+                SweptSide::Up   => U256::from(1u64),
+                SweptSide::Down => U256::from(2u64),
+            }),
         ]),
     ]);
     let mut inner_calldata = redeem_selector.to_vec();

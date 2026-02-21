@@ -826,39 +826,11 @@ impl OracleEngine {
                 return;
             }
         } else {
-            // Fallback: bid-based heuristic (no Chainlink data yet)
-            let momentum = self.spot_momentum(market.asset, 30);
-            let momentum_ok = |side: SweptSide| -> bool {
-                match momentum {
-                    None => true,
-                    Some(pct) => match side {
-                        SweptSide::Up   => pct >= -0.02,
-                        SweptSide::Down => pct <= 0.02,
-                    },
-                }
-            };
-            // Fallback requires bid >= MAX_SWEEP_PRICE to ensure positive EV:
-            // if buyers pay >= 0.92, P(win) >= 0.92 > our ask cap of 0.92 → EV > 0
-            if up_book.best_bid >= MAX_SWEEP_PRICE
-                && down_book.best_bid <= MAX_LOSING_BID
-                && momentum_ok(SweptSide::Up)
-            {
-                (SweptSide::Up, up_book, "BID")
-            } else if down_book.best_bid >= MAX_SWEEP_PRICE
-                && up_book.best_bid <= MAX_LOSING_BID
-                && momentum_ok(SweptSide::Down)
-            {
-                (SweptSide::Down, down_book, "BID")
-            } else {
-                let now_inst = std::time::Instant::now();
-                let last = self.last_debug_log.get(&market.event_slug).copied();
-                if last.map_or(true, |t| now_inst.duration_since(t).as_secs() >= 5) {
-                    debug!("⏳ {} — unclear: UpBid={:.3} DownBid={:.3} ({:.0}s left)",
-                           market.title, up_book.best_bid, down_book.best_bid, secs_remaining);
-                    self.last_debug_log.insert(market.event_slug.clone(), now_inst);
-                }
-                return;
-            }
+            // No fresh Chainlink data — skip entirely. Never trade without oracle confirmation.
+            // The BID heuristic was removed after it caused a $0.07 buy (losing side) on
+            // XRP 3:50-3:55 when book data was stale. Chainlink via Alchemy is always
+            // available within 30s; if it's missing, something is wrong — don't trade.
+            return;
         };
 
         // Early capital check — avoid log spam when capital is exhausted

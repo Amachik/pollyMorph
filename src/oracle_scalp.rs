@@ -182,8 +182,6 @@ pub struct OracleEngine {
     last_reconcile: std::time::Instant,
     /// Set after a fill or balance error — triggers on-chain balance refresh on next scan tick
     needs_balance_refresh: bool,
-    /// Cooldown: last time a signal was fired or attempted — prevents WS burst spam
-    last_signal_fired: std::time::Instant,
     /// Per-slug last redeem attempt time — prevents rapid retry after failure
     last_redeem_attempt: HashMap<String, std::time::Instant>,
     /// Shared Chainlink price state — updated by background poller every 3s
@@ -274,7 +272,6 @@ impl OracleEngine {
             spot_rx,
             last_reconcile: std::time::Instant::now(),
             needs_balance_refresh: false,
-            last_signal_fired: std::time::Instant::now() - std::time::Duration::from_secs(10),
             chainlink_prices,
             vol_samples: HashMap::new(),
             last_chainlink_price: HashMap::new(),
@@ -723,8 +720,6 @@ impl OracleEngine {
             .map(|m| m.up_token_id.clone())
             .collect();
         for asset_id in check_ids {
-            // Bypass the 2s WS-burst cooldown for the periodic scan
-            self.last_signal_fired = std::time::Instant::now() - std::time::Duration::from_secs(10);
             self.check_entry_signal(asset_id).await;
         }
     }
@@ -744,16 +739,12 @@ impl OracleEngine {
             None => return,
         };
         if self.executing_slugs.contains(&market.event_slug) { return; }
-        // Block new sweeps while ANY sweep is in-flight — on-chain balance is shared
-        if !self.executing_slugs.is_empty() { return; }
         // Never sweep a market we already hold an unredeemed position in
         if self.positions.iter().any(|p| p.market.event_slug == market.event_slug && !p.redeemed) { return; }
         // Per-market cooldown: allow re-sweep after RESWEEP_COOLDOWN_MS (not a permanent block)
         if let Some(last) = self.last_sweep_attempt.get(&market.event_slug) {
             if last.elapsed().as_millis() < RESWEEP_COOLDOWN_MS { return; }
         }
-        // Global cooldown: don't re-evaluate signals within SIGNAL_COOLDOWN_MS of the last attempt
-        if self.last_signal_fired.elapsed().as_millis() < SIGNAL_COOLDOWN_MS { return; }
 
         let now = chrono::Utc::now().timestamp();
         let secs_remaining = market.event_end_ts - now;
@@ -860,10 +851,9 @@ impl OracleEngine {
             return;
         }
 
-        // Insert slug FIRST to block all subsequent WS-triggered evaluations
+        // Insert slug FIRST to block subsequent WS-triggered evaluations for this market
         self.executing_slugs.insert(market.event_slug.clone());
         self.last_sweep_attempt.insert(market.event_slug.clone(), std::time::Instant::now());
-        self.last_signal_fired = std::time::Instant::now();
 
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
         info!("🎯 ORACLE SIGNAL [{}]: {} | {} @ {:.3} (sweep≤{:.3}) | {:.0} tokens | ${:.2} cost | {:.0}s left",
@@ -932,14 +922,12 @@ impl OracleEngine {
         // causes "no orders found" kills when the book moves between snapshot and
         // order submission. Using the hard cap (0.93) ensures we fill at whatever
         // the live ask is, as long as it's within our margin.
+        // Use total_tokens directly from compute_sweep — it is already book-depth and
+        // capital-fraction limited. Re-deriving from capital here causes over-reservation
+        // on thin books (FAK fills less than ordered, but we reserved for the full amount).
         let price_cap = MAX_SWEEP_PRICE;
-        let sz_rounded = (total_tokens * 10000.0).round() / 10000.0;
-        let actual_cost = sz_rounded * price_cap; // worst-case cost reservation
-        let actual_cost = actual_cost.min(available * MAX_CAPITAL_FRACTION);
-        // Enforce CLOB minimum of $1.00 — if capping by fraction drops us below $1, use full available
-        let actual_cost = if actual_cost < 1.0 && available >= 1.0 { available.min(available) } else { actual_cost };
-        let sz_capped = actual_cost / price_cap;
-        let sz_final = (sz_capped * 10000.0).round() / 10000.0;
+        let sz_final = (total_tokens * 100.0).floor() / 100.0; // 2dp rounding
+        let actual_cost = sz_final * price_cap;
         if sz_final < MIN_ORDER_SIZE || actual_cost < 1.0 {
             self.executing_slugs.remove(&market.event_slug);
             return;

@@ -35,20 +35,22 @@ const ENTRY_WINDOW_SECS: i64 = 180;  // Start watching in final 3 min
 const MIN_SECS_REMAINING: i64 = 3;   // Enter as late as 3s before lock — stale asks exist until the last second
 const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
+const MIN_SWEEP_PRICE: f64 = 0.82;   // Buy floor: never buy asks below 82¢ — market must have decided
 const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: sweep asks up to 93¢
 const EXIT_SELL_PRICE: f64 = 0.98;   // GTC sell — fallback if we enter early; at P=0.99 we redeem at $1.00
-// STRATEGY: Terminal value sniping — identical to 0x1979ae6B
-// Wait until final seconds when P(win) is near-certain (0.97+).
-// Chainlink price is already above/below strike. Market has repriced
-// to 0.91-0.93 range — sweep those asks for positive EV profit.
+// STRATEGY: Terminal value sniping
+// Only enter when market has ALREADY priced the winning side at 0.82-0.93.
+// This means: market agrees the outcome is near-certain, we just buy the
+// remaining stale asks before they're cancelled.
+//
+// MIN_SWEEP_PRICE=0.82 is critical: a $0.40 ask means the market is 50/50.
+// No matter what the Chainlink model says, if asks are at 0.40-0.70 the
+// market disagrees — don't fight it.
 //
 // EV math (fee-adjusted): fee = C * feeRate * (p*(1-p))^1
 // At p=0.93: fee = 0.93 * 0.10 * (0.93*0.07) = $0.0061/token
 // Cost at ask=0.93: $0.93 + $0.0061 = $0.9361
 // EV at P(win)=0.97: $0.97 - $0.9361 = +$0.034/token
-// Loss rate: ~3% — near risk-free
-// Depth: 3-11 tokens per signal but fills actually execute now
-// Volume = many markets * many signals, not depth per signal
 const FAIR_VALUE_THRESHOLD: f64 = 0.97; // P(win) >= 97%: near-certain outcome
 const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: stale ask is at least 4¢ below fair value
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
@@ -818,9 +820,9 @@ impl OracleEngine {
                 self.last_debug_log.insert(market.event_slug.clone(), now_inst);
             }
 
-            if fv_up >= FAIR_VALUE_THRESHOLD && up_edge >= EDGE_THRESHOLD && up_ask <= MAX_SWEEP_PRICE {
+            if fv_up >= FAIR_VALUE_THRESHOLD && up_edge >= EDGE_THRESHOLD && up_ask >= MIN_SWEEP_PRICE && up_ask <= MAX_SWEEP_PRICE {
                 (SweptSide::Up, up_book, "CL")
-            } else if fv_down >= FAIR_VALUE_THRESHOLD && dn_edge >= EDGE_THRESHOLD && dn_ask <= MAX_SWEEP_PRICE {
+            } else if fv_down >= FAIR_VALUE_THRESHOLD && dn_edge >= EDGE_THRESHOLD && dn_ask >= MIN_SWEEP_PRICE && dn_ask <= MAX_SWEEP_PRICE {
                 (SweptSide::Down, down_book, "CL")
             } else {
                 return;
@@ -880,6 +882,7 @@ impl OracleEngine {
         let mut cost = 0.0_f64;
         let mut sweep_price = book.best_ask.max(book.ask_levels[0].price);
         for level in &book.ask_levels {
+            if level.price < MIN_SWEEP_PRICE { continue; } // skip cheap asks — market is uncertain
             if level.price > MAX_SWEEP_PRICE { break; }
             let remaining = max_usdc - cost;
             if remaining < 0.50 { break; } // need at least 50¢ to add a level

@@ -1017,6 +1017,62 @@ impl OracleEngine {
                           if won { "WON ✅" } else { "LOST ❌" }, pos.cost_usdc);
 
                     if won {
+                        // If we had a GTC sell order, check whether it already filled
+                        // (token gone from holdings) before attempting on-chain redemption.
+                        // This handles the edge case where the sell fills in the final seconds
+                        // after event_end_ts, which reconcile_positions skips.
+                        let sell_already_filled = if pos.sell_order_id.is_some() {
+                            let token_id = match pos.swept_side {
+                                SweptSide::Up   => &pos.market.up_token_id,
+                                SweptSide::Down => &pos.market.down_token_id,
+                            };
+                            let addr = self.executor.wallet_address().to_string();
+                            let url = format!(
+                                "https://data-api.polymarket.com/positions?user={}&sizeThreshold=0.1",
+                                addr
+                            );
+                            match self.client.get(&url).send().await {
+                                Ok(r) if r.status().is_success() => {
+                                    match r.json::<serde_json::Value>().await {
+                                        Ok(val) => {
+                                            let arr = val.as_array()
+                                                .or_else(|| val.get("data").and_then(|d| d.as_array()));
+                                            match arr {
+                                                Some(positions) => {
+                                                    let held: HashSet<String> = positions.iter()
+                                                        .filter_map(|p| {
+                                                            if p["size"].as_f64().unwrap_or(0.0) > 0.1 {
+                                                                p["asset"].as_str().map(|s| s.to_string())
+                                                            } else { None }
+                                                        }).collect();
+                                                    !held.contains(token_id)
+                                                }
+                                                None => false,
+                                            }
+                                        }
+                                        Err(_) => false,
+                                    }
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if sell_already_filled {
+                            // Sell exit filled — book profit without redemption
+                            let proceeds = pos.tokens_bought * EXIT_SELL_PRICE;
+                            let profit = proceeds - pos.cost_usdc;
+                            self.capital_usdc += proceeds;
+                            self.total_pnl += profit;
+                            self.sweeps_completed += 1;
+                            info!("💰 SELL EXIT (late): {} | +${:.2} proceeds | +${:.2} profit | Total P&L: ${:.2}",
+                                  pos.market.title, proceeds, profit, self.total_pnl);
+                            self.positions.retain(|p| {
+                                !(p.market.event_slug == pos.market.event_slug && !p.redeemed)
+                            });
+                            save_positions(&self.positions);
+                        } else {
                         self.executing_slugs.insert(pos.market.event_slug.clone());
                         self.last_redeem_attempt.insert(pos.market.event_slug.clone(), std::time::Instant::now());
                         let redeem_tx = self.redeem_tx.clone();
@@ -1047,6 +1103,7 @@ impl OracleEngine {
                             ).await;
                             let _ = redeem_tx.send(r).await;
                         });
+                        } // end sell_already_filled else
                     } else {
                         // Lost — record loss and remove position
                         self.total_pnl -= pos.cost_usdc;

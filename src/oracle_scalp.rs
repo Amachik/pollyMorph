@@ -30,12 +30,12 @@ use tracing::{info, warn, error, debug};
 // Constants
 // ---------------------------------------------------------------------------
 
-const ENTRY_WINDOW_SECS: i64 = 300;  // Enter up to 5 min before end — buy early at 0.50-0.85
-const MIN_SECS_REMAINING: i64 = 30;  // Don't enter in final 30s — not enough time to sell
-const MIN_WINNING_BID: f64 = 0.55;   // Winning side best_bid >= 55¢ — market leaning but not priced in
-const MAX_LOSING_BID: f64 = 0.45;    // Losing side best_bid <= 45¢ — clear directional signal
-const MAX_SWEEP_PRICE: f64 = 0.87;   // Buy cap: don't pay more than 87¢ (need room to sell at 0.97)
-const EXIT_SELL_PRICE: f64 = 0.97;   // Sell limit price: late-window bots will buy from us at 0.97
+const ENTRY_WINDOW_SECS: i64 = 180;  // Enter in final 3 min — market direction is clear but sweep bots haven't arrived
+const MIN_SECS_REMAINING: i64 = 15;  // Don't enter in final 15s — not enough time for sell to route
+const MIN_WINNING_BID: f64 = 0.85;   // Winning side best_bid >= 85¢ — market has decided direction
+const MAX_LOSING_BID: f64 = 0.15;    // Losing side best_bid <= 15¢ — other side nearly dead
+const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: don't pay more than 93¢ (4¢ margin to sell at 0.97)
+const EXIT_SELL_PRICE: f64 = 0.97;   // Sell limit price: sweep bots will buy from us at 0.97
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade
@@ -782,7 +782,7 @@ impl OracleEngine {
                 size: Decimal::from_f64_retain((result.tokens_total * 10000.0).round() / 10000.0)
                     .unwrap_or(Decimal::new(1, 0)),
                 order_type: OrderType::GoodTilCancelled,
-                urgency: SignalUrgency::Low,
+                urgency: SignalUrgency::High,
                 expected_profit_bps: ((EXIT_SELL_PRICE - avg) / avg * 10000.0) as i32,
                 signal_timestamp_ns: 0,
             };

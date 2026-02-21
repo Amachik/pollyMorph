@@ -893,6 +893,9 @@ impl OracleEngine {
     async fn check_and_redeem(&mut self) {
         let now = chrono::Utc::now().timestamp();
         let redeem_cooldown = std::time::Duration::from_secs(30);
+        // Deduplicate by slug — only one redeem attempt per market per tick,
+        // even if multiple positions exist for the same slug.
+        let mut seen_slugs: HashSet<String> = HashSet::new();
         let to_check: Vec<OraclePosition> = self.positions.iter()
             .filter(|p| {
                 !p.redeemed
@@ -900,6 +903,7 @@ impl OracleEngine {
                     && now >= p.market.event_end_ts + 60
                     && self.last_redeem_attempt.get(&p.market.event_slug)
                         .map_or(true, |t| t.elapsed() >= redeem_cooldown)
+                    && seen_slugs.insert(p.market.event_slug.clone())
             })
             .cloned()
             .collect();

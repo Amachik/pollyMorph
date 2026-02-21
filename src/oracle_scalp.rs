@@ -42,13 +42,15 @@ const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy fr
 const FAIR_VALUE_THRESHOLD: f64 = 0.94; // Only enter when P(win) >= 94% (clear positive EV at ask<=0.92)
 const EDGE_THRESHOLD: f64 = 0.02;    // Require fair_value - ask >= 2¢ (buying underpriced tokens)
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
-const MAX_BET_USDC: f64 = 500.0;
-const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade
-const BET_MIN_USDC: f64 = 5.0;         // Never bet less than $5 — min_size=5 tokens at ~$0.93 = $4.65 minimum
-const BET_MAX_USDC: f64 = 25.0;        // Never bet more than $25 per trade
+const SIGNAL_COOLDOWN_MS: u128 = 500;   // Global signal cooldown — 500ms allows WS-driven signals to fire quickly
+const MAX_BET_USDC: f64 = 10_000.0;    // Hard ceiling — never risk more than $10k in one trade
+const BET_FRACTION: f64 = 0.40;        // Bet 40% of available capital per trade
+const BET_MIN_USDC: f64 = 5.0;         // Never bet less than $5 — min_size=5 tokens at ~$0.92 = $4.60 minimum
+const BET_MAX_CAPITAL_FRACTION: f64 = 0.50; // Never risk more than 50% of capital in one trade
 const MAX_CAPITAL_FRACTION: f64 = 0.90;
 const MIN_ORDER_SIZE: f64 = 1.0;   // CLOB minimum ~1 token; sizing is dynamic based on balance
-const MARKET_SCAN_INTERVAL_SECS: u64 = 10;
+const MARKET_SCAN_INTERVAL_SECS: u64 = 10; // Housekeeping: discover, reconcile, redeem
+const BOOK_POLL_INTERVAL_SECS: u64 = 2;    // REST book refresh + oracle update + signal check
 const PRE_MARKET_LEAD_SECS: i64 = 300;
 const WS_CHANNEL_BUFFER: usize = 1024;
 const POSITIONS_FILE: &str = "oracle_positions.json";
@@ -484,11 +486,18 @@ impl OracleEngine {
             let _ = self.ws_cmd_tx.send(WsCommand::Subscribe(ids)).await;
         }
 
-        let mut scan_interval = tokio::time::interval(
+        let mut housekeeping_interval = tokio::time::interval(
             std::time::Duration::from_secs(MARKET_SCAN_INTERVAL_SECS),
         );
-        scan_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        scan_interval.tick().await;
+        housekeeping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        housekeeping_interval.tick().await;
+        // Faster interval: REST book refresh + oracle vol update + signal checks
+        // WS already fires signals in real-time; this catches markets where WS book
+        // data is stale or missing (REST fallback).
+        let mut book_poll_interval = tokio::time::interval(
+            std::time::Duration::from_secs(BOOK_POLL_INTERVAL_SECS),
+        );
+        book_poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut status_interval = tokio::time::interval(std::time::Duration::from_secs(60));
 
         loop {
@@ -522,16 +531,20 @@ impl OracleEngine {
                 r = self.redeem_rx.recv() => {
                     if let Some(r) = r { self.handle_redeem_result(r); }
                 }
-                _ = scan_interval.tick() => {
+                _ = book_poll_interval.tick() => {
+                    // Fast path: refresh books + oracle + fire signals every 2s
+                    self.drain_spot_prices();
+                    self.poll_books_and_check_signals().await;
+                }
+                _ = housekeeping_interval.tick() => {
                     if self.shutdown.load(Ordering::Relaxed) {
                         info!("🛑 ORACLE ENGINE shutting down");
                         break;
                     }
-                    self.drain_spot_prices();
+                    // Slow path: market discovery, position reconciliation, redemptions
                     self.reconcile_positions().await;
                     self.check_and_redeem().await;
                     self.discover_and_subscribe().await;
-                    self.poll_books_and_check_signals().await;
                 }
                 _ = status_interval.tick() => {
                     let deployed: f64 = self.positions.iter().map(|p| p.cost_usdc).sum();
@@ -739,8 +752,8 @@ impl OracleEngine {
         if let Some(last) = self.last_sweep_attempt.get(&market.event_slug) {
             if last.elapsed().as_millis() < RESWEEP_COOLDOWN_MS { return; }
         }
-        // Global cooldown: don't re-evaluate signals within 2s of the last attempt
-        if self.last_signal_fired.elapsed().as_millis() < 2000 { return; }
+        // Global cooldown: don't re-evaluate signals within SIGNAL_COOLDOWN_MS of the last attempt
+        if self.last_signal_fired.elapsed().as_millis() < SIGNAL_COOLDOWN_MS { return; }
 
         let now = chrono::Utc::now().timestamp();
         let secs_remaining = market.event_end_ts - now;
@@ -865,10 +878,12 @@ impl OracleEngine {
     /// sweep_price is the highest ask level we'd fill against (used as FAK limit price).
     fn compute_sweep(&self, book: &TokenBook) -> (f64, f64, f64) {
         if book.ask_levels.is_empty() { return (0.0, 0.0, MAX_SWEEP_PRICE); }
+        // Scale bet with capital: 40% of available, capped at 50% per trade, floored at $5
         let bet_size = (self.capital_usdc * BET_FRACTION)
             .max(BET_MIN_USDC)
-            .min(BET_MAX_USDC);
-        let max_usdc = MAX_BET_USDC.min(self.capital_usdc * MAX_CAPITAL_FRACTION).min(bet_size);
+            .min(self.capital_usdc * BET_MAX_CAPITAL_FRACTION)
+            .min(MAX_BET_USDC);
+        let max_usdc = bet_size.min(self.capital_usdc * MAX_CAPITAL_FRACTION);
         let mut tokens = 0.0_f64;
         let mut cost = 0.0_f64;
         let mut sweep_price = book.best_ask.max(book.ask_levels[0].price);

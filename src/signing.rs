@@ -438,22 +438,22 @@ impl OrderSigner {
         //
         //   SELL: makerAmount = tokens paid      → max 2 decimal places
         //         takerAmount = USDC received    → max 4 decimal places
-        //
-        // Both sides: maker=2dp, taker=4dp.
         let size_2dp = size.round_dp(2);
-        let notional_4dp = (size_2dp * price).round_dp(4);
-
-        let size_tokens = Self::to_token_decimals(size_2dp);
-        let notional = Self::to_token_decimals(notional_4dp);
 
         match side {
             Side::Buy => {
                 // BUY: maker=USDC(2dp), taker=tokens(4dp)
-                (U256::from(notional), U256::from(size_tokens))
+                let usdc_2dp   = (size_2dp * price).round_dp(2);
+                let tokens_4dp = size_2dp.round_dp(4);
+                (U256::from(Self::to_token_decimals(usdc_2dp)),
+                 U256::from(Self::to_token_decimals(tokens_4dp)))
             }
             Side::Sell => {
                 // SELL: maker=tokens(2dp), taker=USDC(4dp)
-                (U256::from(size_tokens), U256::from(notional))
+                let tokens_2dp = size_2dp;
+                let usdc_4dp   = (size_2dp * price).round_dp(4);
+                (U256::from(Self::to_token_decimals(tokens_2dp)),
+                 U256::from(Self::to_token_decimals(usdc_4dp)))
             }
         }
     }

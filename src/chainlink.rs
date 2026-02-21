@@ -18,8 +18,8 @@ const ETH_USD_ADDR: &str  = "0xF9680D99D6C9589e2a93a78A04A279e509205945";
 const SOL_USD_ADDR: &str  = "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC";
 const XRP_USD_ADDR: &str  = "0x785ba89291f676b5386652eB12b30cF361020694";
 
-/// Public Polygon RPC — no API key required
-const POLYGON_RPC: &str = "https://1rpc.io/matic";
+/// Public Polygon RPC — polygon.llamarpc.com is 3.9ms from Amsterdam VPS (vs 112ms for 1rpc.io/matic)
+const POLYGON_RPC: &str = "https://polygon.llamarpc.com";
 
 /// `latestRoundData()` selector
 const LATEST_ROUND_DATA_SELECTOR: &str = "0xfeaf968c";

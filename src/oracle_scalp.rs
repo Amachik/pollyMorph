@@ -35,15 +35,17 @@ const ENTRY_WINDOW_SECS: i64 = 180;  // Enter in final 3 min — market directio
 const MIN_SECS_REMAINING: i64 = 10;  // Don't enter in final 10s — not enough time for sell to route
 const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
-const MAX_SWEEP_PRICE: f64 = 0.92;   // Buy cap: don't pay more than 92¢
-const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy from us at 0.98
+const MAX_SWEEP_PRICE: f64 = 0.82;   // Buy cap: don't pay more than 82¢
+const EXIT_SELL_PRICE: f64 = 0.95;   // Sell limit price: exit before terminal sweep bots arrive
 // EV math (fee-adjusted): profit = P(win)*$1.00 - ask*(1+fee_rate)
-// Polymarket taker fee at p=0.92: fee = 10% * 2 * min(0.92,0.08) = 1.6%
-// Cost per token = ask * 1.016 = 0.92 * 1.016 = 0.9347
-// For positive EV: P(win) > 0.9347. Set threshold to 0.96 for clear margin.
-// EDGE_THRESHOLD must cover fee drag: fee ~= 0.015 at ask=0.92, so need edge >= 0.035
-const FAIR_VALUE_THRESHOLD: f64 = 0.96; // P(win) >= 96%: EV = 0.96 - 0.9347 = +$0.025/token after fees
-const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: covers 1.6% fee drag + 2.4¢ net edge
+// Polymarket taker fee formula: fee = C * feeRate * (p*(1-p))^1
+// At p=0.82: fee = 0.82 * 0.10 * (0.82*0.18) = 0.82 * 0.10 * 0.1476 = $0.0121/token
+// Cost per token at ask=0.82: $0.82 + $0.0121 = $0.8321
+// At P(win)=0.85, ask=0.82: EV = $0.85 - $0.8321 = +$0.0179/token (positive)
+// Key insight: depth at <=0.82 is 200-500 tokens vs 5-50 at <=0.92
+// This gives 5-10x more fill per signal and 5x more signal frequency
+const FAIR_VALUE_THRESHOLD: f64 = 0.85; // P(win) >= 85%: clear directional conviction
+const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: covers fee drag + net edge
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 10_000.0;    // Hard ceiling — never risk more than $10k in one trade
 const BET_FRACTION: f64 = 0.40;        // Bet 40% of available capital per trade

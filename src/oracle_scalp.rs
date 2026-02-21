@@ -1316,6 +1316,27 @@ impl OracleEngine {
                 self.asset_to_market.insert(market.down_token_id.clone(), slug.clone());
                 self.tracked_markets.insert(slug.clone(), market.clone());
             }
+            // Always (re-)register tokens with real fee/tick data from Gamma API.
+            // The WS subscribe path uses register() which defaults fee_rate_bps=0,
+            // causing "invalid fee rate (0)" errors. We must use register_full here.
+            let tick = rust_decimal::Decimal::new((market.tick_size * 100.0) as i64, 2);
+            {
+                use crate::types::TokenMarketInfo;
+                let up_hash = crate::websocket::hash_asset_id(&market.up_token_id);
+                self.token_registry.register_full(up_hash, TokenMarketInfo {
+                    asset_id: market.up_token_id.clone(),
+                    neg_risk: market.neg_risk,
+                    fee_rate_bps: market.up_fee_bps,
+                    tick_size: tick,
+                });
+                let dn_hash = crate::websocket::hash_asset_id(&market.down_token_id);
+                self.token_registry.register_full(dn_hash, TokenMarketInfo {
+                    asset_id: market.down_token_id.clone(),
+                    neg_risk: market.neg_risk,
+                    fee_rate_bps: market.down_fee_bps,
+                    tick_size: tick,
+                });
+            }
             for token_id in [&market.up_token_id, &market.down_token_id] {
                 if !self.ws_subscribed.contains(token_id) {
                     new_ids.push(token_id.clone());

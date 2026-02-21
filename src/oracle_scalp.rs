@@ -36,14 +36,15 @@ const MIN_SECS_REMAINING: i64 = 10;  // Don't enter in final 10s — not enough 
 const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market has decided direction
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
 const MAX_SWEEP_PRICE: f64 = 0.82;   // Buy cap: don't pay more than 82¢
-const EXIT_SELL_PRICE: f64 = 0.95;   // Sell limit price: exit before terminal sweep bots arrive
+const EXIT_SELL_PRICE: f64 = 0.92;   // Sell limit: reachable as P(win) rises toward 1.0 in final 60s
 // EV math (fee-adjusted): profit = P(win)*$1.00 - ask*(1+fee_rate)
 // Polymarket taker fee formula: fee = C * feeRate * (p*(1-p))^1
-// At p=0.82: fee = 0.82 * 0.10 * (0.82*0.18) = 0.82 * 0.10 * 0.1476 = $0.0121/token
+// At p=0.82: fee = 0.82 * 0.10 * (0.82*0.18) = $0.0121/token
 // Cost per token at ask=0.82: $0.82 + $0.0121 = $0.8321
-// At P(win)=0.85, ask=0.82: EV = $0.85 - $0.8321 = +$0.0179/token (positive)
-// Key insight: depth at <=0.82 is 200-500 tokens vs 5-50 at <=0.92
-// This gives 5-10x more fill per signal and 5x more signal frequency
+// EV (hold to redemption): 0.85*$1.00 - $0.8321 = +$0.0179/token
+// EV (sell exit at $0.92):  $0.92 - $0.8321 = +$0.0879/token (5x better if sell fills)
+// Risk: 15% chance of full loss if neither sell fills nor wins redemption
+// Key insight: depth at <=0.82 is 200-500 tokens vs 5-50 at <=0.92 -> fills full bet
 const FAIR_VALUE_THRESHOLD: f64 = 0.85; // P(win) >= 85%: clear directional conviction
 const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: covers fee drag + net edge
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)

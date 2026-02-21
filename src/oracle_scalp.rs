@@ -9,6 +9,7 @@
 //! 5. Fallback: if sell doesn't fill before market ends, cancel sell + redeem for $1.00.
 
 use crate::arb::{ArbAsset, ArbMarket, ArbWsEvent, BookLevel, TokenBook, WsCommand, run_book_watcher};
+use crate::chainlink::{ChainlinkAsset, ChainlinkPrices, run_chainlink_poller};
 use crate::config::Config;
 use crate::execution::OrderExecutor;
 use crate::types::{MarketId, Side, OrderType, TimeInForce, TokenIdRegistry, TradeSignal, SignalUrgency, PreparedOrder};
@@ -36,6 +37,8 @@ const MIN_WINNING_BID: f64 = 0.80;   // Winning side best_bid >= 80¢ — market
 const MAX_LOSING_BID: f64 = 0.20;    // Losing side best_bid <= 20¢ — other side nearly dead
 const MAX_SWEEP_PRICE: f64 = 0.93;   // Buy cap: don't pay more than 93¢ (5¢ margin to sell at 0.98)
 const EXIT_SELL_PRICE: f64 = 0.98;   // Sell limit price: sweep bots will buy from us at 0.98
+const FAIR_VALUE_THRESHOLD: f64 = 0.75; // Chainlink model: only enter when P(win) >= 75%
+const EDGE_THRESHOLD: f64 = 0.02;    // Chainlink model: require fair_value - ask >= 2¢ edge
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 500.0;
 const BET_FRACTION: f64 = 0.20;        // Bet 20% of available capital per trade
@@ -179,6 +182,12 @@ pub struct OracleEngine {
     last_signal_fired: std::time::Instant,
     /// Per-slug last redeem attempt time — prevents rapid retry after failure
     last_redeem_attempt: HashMap<String, std::time::Instant>,
+    /// Shared Chainlink price state — updated by background poller every 3s
+    chainlink_prices: Arc<ChainlinkPrices>,
+    /// Realized volatility ring buffer per asset: (timestamp, log_return)
+    vol_samples: HashMap<ArbAsset, VecDeque<(std::time::Instant, f64)>>,
+    /// Last Chainlink price per asset — used to compute log returns for vol
+    last_chainlink_price: HashMap<ArbAsset, f64>,
 }
 
 impl OracleEngine {
@@ -210,6 +219,12 @@ impl OracleEngine {
         let (spot_tx, spot_rx) = mpsc::channel::<(ArbAsset, f64, std::time::Instant)>(256);
         tokio::spawn(async move {
             run_spot_watcher(spot_tx).await;
+        });
+
+        let chainlink_prices = Arc::new(ChainlinkPrices::new());
+        let cl_prices_for_poller = chainlink_prices.clone();
+        tokio::spawn(async move {
+            run_chainlink_poller(cl_prices_for_poller).await;
         });
 
         let mut recovered = load_positions();
@@ -256,6 +271,9 @@ impl OracleEngine {
             last_reconcile: std::time::Instant::now(),
             needs_balance_refresh: false,
             last_signal_fired: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            chainlink_prices,
+            vol_samples: HashMap::new(),
+            last_chainlink_price: HashMap::new(),
         }
     }
 
@@ -310,6 +328,82 @@ impl OracleEngine {
             .find(|(t, _)| now.duration_since(*t).as_secs() <= window_secs)
             .map(|(_, p)| *p)?;
         Some((latest - oldest) / oldest * 100.0) // % change
+    }
+
+    // -----------------------------------------------------------------------
+    // Chainlink pricing engine
+    // -----------------------------------------------------------------------
+
+    /// Map ArbAsset to ChainlinkAsset for price lookups.
+    fn chainlink_asset_for(asset: ArbAsset) -> ChainlinkAsset {
+        match asset {
+            ArbAsset::BTC => ChainlinkAsset::BTC,
+            ArbAsset::ETH => ChainlinkAsset::ETH,
+            ArbAsset::SOL => ChainlinkAsset::SOL,
+            ArbAsset::XRP => ChainlinkAsset::XRP,
+        }
+    }
+
+    /// Ingest the latest Chainlink price for an asset, updating the vol ring buffer.
+    fn update_chainlink_vol(&mut self, asset: ArbAsset, price: f64) {
+        let last = self.last_chainlink_price.get(&asset).copied();
+        if let Some(prev) = last {
+            if prev > 0.0 && price > 0.0 {
+                let log_ret = (price / prev).ln();
+                let samples = self.vol_samples.entry(asset).or_insert_with(VecDeque::new);
+                samples.push_back((std::time::Instant::now(), log_ret));
+                // Keep only last 15 minutes of samples
+                while samples.front().map_or(false, |(t, _)| t.elapsed().as_secs() > 900) {
+                    samples.pop_front();
+                }
+            }
+        }
+        self.last_chainlink_price.insert(asset, price);
+    }
+
+    /// Annualised realized volatility from Chainlink log returns.
+    /// Returns a sensible default if insufficient data.
+    fn realized_vol(&self, asset: ArbAsset) -> f64 {
+        let samples = match self.vol_samples.get(&asset) {
+            Some(s) if s.len() >= 3 => s,
+            _ => return self.default_vol(asset),
+        };
+        let returns: Vec<f64> = samples.iter().map(|(_, r)| *r).collect();
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
+            / (returns.len() - 1) as f64;
+        let std_per_sample = variance.sqrt();
+        // Samples arrive ~every 3s; annualise: σ_annual = σ_sample * sqrt(365*24*3600/3)
+        let annualised = std_per_sample * (365.0 * 24.0 * 3600.0_f64 / 3.0).sqrt();
+        annualised.clamp(0.20, 5.0) // clamp to sane range
+    }
+
+    fn default_vol(&self, asset: ArbAsset) -> f64 {
+        match asset {
+            ArbAsset::BTC => 0.60,
+            ArbAsset::ETH => 0.80,
+            ArbAsset::SOL => 1.20,
+            ArbAsset::XRP => 1.00,
+        }
+    }
+
+    /// Digital option fair value: P(price_end >= strike) using log-normal model.
+    ///
+    /// Formula: Φ(d) where d = ln(S/K) / (σ * √T)
+    ///   S = current Chainlink price
+    ///   K = Chainlink price at window start (strike)
+    ///   σ = annualised realized vol
+    ///   T = time remaining in years
+    ///
+    /// Returns None if strike or current price is unknown.
+    fn fair_value_up(&self, market: &ArbMarket, current_price: f64, sigma: f64) -> Option<f64> {
+        let strike = market.strike_price;
+        if strike <= 0.0 || current_price <= 0.0 { return None; }
+        let now = chrono::Utc::now().timestamp();
+        let t_secs = (market.event_end_ts - now).max(1) as f64;
+        let t_years = t_secs / (365.25 * 24.0 * 3600.0);
+        let d = (current_price / strike).ln() / (sigma * t_years.sqrt());
+        Some(normal_cdf(d))
     }
 
     pub async fn run(&mut self) {
@@ -556,7 +650,36 @@ impl OracleEngine {
             }
         }
 
-        // Run signal check on all markets in entry window (use up_token_id only — 
+        // Update Chainlink vol samples and record strike prices
+        for asset in [ArbAsset::BTC, ArbAsset::ETH, ArbAsset::SOL, ArbAsset::XRP] {
+            let cl_asset = Self::chainlink_asset_for(asset);
+            if let Some(sample) = self.chainlink_prices.get(cl_asset) {
+                self.update_chainlink_vol(asset, sample.price);
+            }
+        }
+
+        // Record strike price for markets entering the entry window for the first time.
+        // The strike = Chainlink price at window start (used for fair value calculation).
+        let slugs_needing_strike: Vec<String> = markets_needing_books.iter()
+            .filter(|m| {
+                let secs_left = m.event_end_ts - now_ts;
+                secs_left > 0 && secs_left <= ENTRY_WINDOW_SECS
+            })
+            .filter(|m| m.strike_price == 0.0)
+            .map(|m| m.event_slug.clone())
+            .collect();
+        for slug in slugs_needing_strike {
+            if let Some(market) = self.tracked_markets.get_mut(&slug) {
+                let cl_asset = Self::chainlink_asset_for(market.asset);
+                if let Some(price) = self.chainlink_prices.fresh_price(cl_asset, 60) {
+                    market.strike_price = price;
+                    info!("⛓️  Strike recorded: {} | K=${:.4} ({}s left)",
+                          market.title, price, market.event_end_ts - now_ts);
+                }
+            }
+        }
+
+        // Run signal check on all markets in entry window (use up_token_id only —
         // check_entry_signal looks up the market from either token and evaluates both sides)
         let check_ids: Vec<String> = markets_needing_books.iter()
             .filter(|m| {
@@ -611,33 +734,66 @@ impl OracleEngine {
             None => return,
         };
 
-        // Determine winning side using best_bid (not best_ask).
-        // In binary markets, the winning token has high bids (near $1), losing has low bids (near $0).
-        // We then sweep the winning side's ask book up to MAX_SWEEP_PRICE.
-        // Fee formula: fee_rate = baseFee(10%) * 2 * min(p, 1-p) — very low at high prices.
-        // Spot price momentum check: require price to be moving in the oracle direction.
-        let momentum = self.spot_momentum(market.asset, 30);
-        let momentum_ok = |side: SweptSide| -> bool {
-            match momentum {
-                None => true, // no data yet — allow
-                Some(pct) => match side {
-                    SweptSide::Up   => pct >= -0.02,
-                    SweptSide::Down => pct <= 0.02,
-                },
-            }
-        };
+        // ── Chainlink fair-value signal ──────────────────────────────────────
+        // Primary: use the Chainlink oracle price to compute P(Up) via a
+        // digital option model. Enter when the market misprices the outcome.
+        //
+        // Secondary (fallback): bid-based heuristic when Chainlink data is
+        // unavailable (e.g. first 10s after startup before first poll).
+        let cl_asset = Self::chainlink_asset_for(market.asset);
+        let cl_price_opt = self.chainlink_prices.fresh_price(cl_asset, 30);
 
-        let (winning_side, winning_book) =
+        let (winning_side, winning_book, signal_source) = if let Some(cl_price) = cl_price_opt {
+            let sigma = self.realized_vol(market.asset);
+            let fv_up = self.fair_value_up(&market, cl_price, sigma).unwrap_or(0.5);
+            let fv_down = 1.0 - fv_up;
+
+            // Require fair value >= FAIR_VALUE_THRESHOLD on the winning side,
+            // and the market ask must be below fair value by at least EDGE_THRESHOLD.
+            // This means we're buying something worth 0.85 for 0.93 or less.
+            let up_ask = up_book.best_ask;
+            let dn_ask = down_book.best_ask;
+            let up_edge = fv_up - up_ask;
+            let dn_edge = fv_down - dn_ask;
+
+            let now_inst = std::time::Instant::now();
+            let last = self.last_debug_log.get(&market.event_slug).copied();
+            if last.map_or(true, |t| now_inst.duration_since(t).as_secs() >= 5) {
+                debug!("⛓️  {} | CL=${:.4} K={:.4} σ={:.2} | FV_up={:.3} FV_dn={:.3} | ask_up={:.3} ask_dn={:.3} | edge_up={:+.3} edge_dn={:+.3} | {}s",
+                       market.title, cl_price, market.strike_price, sigma,
+                       fv_up, fv_down, up_ask, dn_ask, up_edge, dn_edge, secs_remaining);
+                self.last_debug_log.insert(market.event_slug.clone(), now_inst);
+            }
+
+            if fv_up >= FAIR_VALUE_THRESHOLD && up_edge >= EDGE_THRESHOLD && up_ask <= MAX_SWEEP_PRICE {
+                (SweptSide::Up, up_book, "CL")
+            } else if fv_down >= FAIR_VALUE_THRESHOLD && dn_edge >= EDGE_THRESHOLD && dn_ask <= MAX_SWEEP_PRICE {
+                (SweptSide::Down, down_book, "CL")
+            } else {
+                return;
+            }
+        } else {
+            // Fallback: bid-based heuristic (no Chainlink data yet)
+            let momentum = self.spot_momentum(market.asset, 30);
+            let momentum_ok = |side: SweptSide| -> bool {
+                match momentum {
+                    None => true,
+                    Some(pct) => match side {
+                        SweptSide::Up   => pct >= -0.02,
+                        SweptSide::Down => pct <= 0.02,
+                    },
+                }
+            };
             if up_book.best_bid >= MIN_WINNING_BID
                 && down_book.best_bid <= MAX_LOSING_BID
                 && momentum_ok(SweptSide::Up)
             {
-                (SweptSide::Up, up_book)
+                (SweptSide::Up, up_book, "BID")
             } else if down_book.best_bid >= MIN_WINNING_BID
                 && up_book.best_bid <= MAX_LOSING_BID
                 && momentum_ok(SweptSide::Down)
             {
-                (SweptSide::Down, down_book)
+                (SweptSide::Down, down_book, "BID")
             } else {
                 let now_inst = std::time::Instant::now();
                 let last = self.last_debug_log.get(&market.event_slug).copied();
@@ -647,18 +803,18 @@ impl OracleEngine {
                     self.last_debug_log.insert(market.event_slug.clone(), now_inst);
                 }
                 return;
-            };
+            }
+        };
 
         // Early capital check — avoid log spam when capital is exhausted
         let available = self.capital_usdc.min(MAX_BET_USDC);
         if available < MIN_ORDER_SIZE {
-            return; // silently skip — no point logging hundreds of times
+            return;
         }
 
         let (total_tokens, total_cost, sweep_price) = self.compute_sweep(&winning_book);
         if total_tokens < MIN_ORDER_SIZE || total_cost < 0.50 { return; }
         // Require at least min_size tokens (CLOB minimum for GTC sell orders = 5).
-        // A fill below this threshold can't be sold and must wait for redemption.
         if total_tokens < market.min_size as f64 {
             let now_inst = std::time::Instant::now();
             let last = self.last_debug_log.get(&market.event_slug).copied();
@@ -676,9 +832,9 @@ impl OracleEngine {
         self.last_signal_fired = std::time::Instant::now();
 
         let side_label = match winning_side { SweptSide::Up => "UP", SweptSide::Down => "DOWN" };
-        let mom_str = momentum.map_or("n/a".to_string(), |m| format!("{:+.3}%", m));
-        info!("🎯 ORACLE SIGNAL: {} | {} @ {:.3} (sweep≤{:.3}) | {:.0} tokens | ${:.2} cost | {:.0}s left | spot {}",
-              market.title, side_label, winning_book.best_ask, sweep_price, total_tokens, total_cost, secs_remaining, mom_str);
+        info!("🎯 ORACLE SIGNAL [{}]: {} | {} @ {:.3} (sweep≤{:.3}) | {:.0} tokens | ${:.2} cost | {:.0}s left",
+              signal_source, market.title, side_label, winning_book.best_ask, sweep_price,
+              total_tokens, total_cost, secs_remaining);
 
         self.execute_sweep(&market, winning_side, total_tokens, total_cost, sweep_price);
     }
@@ -1499,6 +1655,24 @@ impl OracleEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Math helpers
+// ---------------------------------------------------------------------------
+
+/// Standard normal CDF using Abramowitz & Stegun rational approximation.
+/// Max absolute error: 7.5e-8.
+fn normal_cdf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.2316419 * x.abs());
+    let poly = t * (0.319381530
+        + t * (-0.356563782
+        + t * (1.781477937
+        + t * (-1.821255978
+        + t * 1.330274429))));
+    let pdf = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let cdf = 1.0 - pdf * poly;
+    if x >= 0.0 { cdf } else { 1.0 - cdf }
+}
+
+// ---------------------------------------------------------------------------
 // Parse a Gamma API event JSON into an ArbMarket
 // ---------------------------------------------------------------------------
 
@@ -1567,6 +1741,7 @@ fn parse_event_to_market(event: &serde_json::Value, event_id: &str, asset: ArbAs
         min_size: 5.0,
         event_start_ts: start_ts,
         event_end_ts: end_ts,
+        strike_price: 0.0,
     })
 }
 

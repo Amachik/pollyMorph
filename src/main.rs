@@ -33,6 +33,7 @@ mod tuner;
 mod backtester;
 mod simulator;
 mod arb;
+mod chainlink;
 mod oracle_scalp;
 
 use crate::config::{Config, RuntimeParams};

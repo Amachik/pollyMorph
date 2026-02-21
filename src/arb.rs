@@ -173,6 +173,9 @@ pub struct ArbMarket {
     pub up_fee_bps: u32,
     /// Taker fee in basis points for Down token
     pub down_fee_bps: u32,
+    /// Chainlink price at window start (strike). 0.0 = not yet recorded.
+    #[serde(default)]
+    pub strike_price: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1406,6 +1409,7 @@ impl ArbEngine {
             asset,
             up_fee_bps: 0,
             down_fee_bps: 0,
+            strike_price: 0.0,
         })
     }
 
@@ -3167,6 +3171,7 @@ async fn run_background_merge(
                 asset: ArbAsset::BTC, // Will be corrected by position lookup
                 up_fee_bps: 0,
                 down_fee_bps: 0,
+                strike_price: 0.0,
             },
             up_tokens_bought: excess_up,
             down_tokens_bought: excess_down,

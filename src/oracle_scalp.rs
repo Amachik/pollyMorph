@@ -14,7 +14,7 @@ use crate::execution::OrderExecutor;
 use crate::types::{MarketId, Side, OrderType, TimeInForce, TokenIdRegistry, TradeSignal, SignalUrgency, PreparedOrder};
 use crate::websocket::hash_asset_id;
 
-use ethers::types::{Address, U256};
+use ethers::types::U256;
 
 use futures_util::{FutureExt, StreamExt};
 use rust_decimal::Decimal;
@@ -781,8 +781,8 @@ impl OracleEngine {
                 price: Decimal::from_f64_retain(EXIT_SELL_PRICE).unwrap_or(Decimal::new(97, 2)),
                 size: Decimal::from_f64_retain((result.tokens_total * 10000.0).round() / 10000.0)
                     .unwrap_or(Decimal::new(1, 0)),
-                order_type: OrderType::GoodTillCancelled,
-                urgency: SignalUrgency::Normal,
+                order_type: OrderType::GoodTilCancelled,
+                urgency: SignalUrgency::Low,
                 expected_profit_bps: ((EXIT_SELL_PRICE - avg) / avg * 10000.0) as i32,
                 signal_timestamp_ns: 0,
             };

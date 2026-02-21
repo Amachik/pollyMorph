@@ -876,7 +876,7 @@ impl OracleEngine {
             .max(BET_MIN_USDC)
             .min(self.capital_usdc * BET_MAX_CAPITAL_FRACTION)
             .min(MAX_BET_USDC);
-        let max_usdc = bet_size.min(self.capital_usdc * MAX_CAPITAL_FRACTION);
+        let max_usdc = bet_size.min(self.capital_usdc * BET_MAX_CAPITAL_FRACTION);
         let mut tokens = 0.0_f64;
         let mut cost = 0.0_f64;
         let mut sweep_price = book.best_ask.max(book.ask_levels[0].price);

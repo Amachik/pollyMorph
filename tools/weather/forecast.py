@@ -31,7 +31,7 @@ from .markets import TempBucket
 from .calibration import (
     CityCalibration, apply_bias_correction, bayesian_condition_on_current,
 )
-from .wunderground import fetch_wu_forecast, WUForecast
+from .wunderground import fetch_wu_forecast, fetch_wu_forecast_all_days, WUForecast
 from .mos import get_or_build_mos, generate_mos_samples, StationMOS
 from .datalog import (
     log_ensemble_batch, log_deterministic, log_current_weather, log_forecast,
@@ -139,6 +139,7 @@ async def get_forecast(
     hours_remaining: Optional[float] = None,
     reference_date: Optional[date] = None,
     forecast_remaining_max: Optional[float] = None,
+    prefetched_wu: Optional[WUForecast] = None,
 ) -> Optional[ForecastResult]:
     """
     Fetch ensemble weather forecasts from multiple sources and combine them
@@ -168,6 +169,8 @@ async def get_forecast(
     # This replaces 5+ sequential API calls with 3 concurrent ones
 
     async def _fetch_wu():
+        if prefetched_wu is not None:
+            return prefetched_wu
         try:
             return await fetch_wu_forecast(session, city_key, target_date)
         except Exception:

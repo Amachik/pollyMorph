@@ -38,9 +38,9 @@ from .datalog import load_logged_ensembles, load_logged_deterministic, load_logg
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-MOS_HISTORY_DAYS = 30          # Days of history (more data = more stable error profiles)
+MOS_HISTORY_DAYS = 14          # Days of history (shorter = less cold-season drag during warming trends)
 MOS_CACHE_FILE = Path(__file__).parent.parent.parent / "weather_mos.json"
-MOS_FRESHNESS_HOURS = 18       # Rebuild MOS after this many hours
+MOS_FRESHNESS_HOURS = 12       # Rebuild MOS after this many hours (NWP updates every 6h)
 MOS_MIN_DAYS = 3               # Minimum usable days for valid MOS
 
 # Historical forecast API — archives past model runs, returns per-model daily max
@@ -74,15 +74,65 @@ WU_FORECAST_FRAC = 0.25        # 25% from WU's own forecast (when available)
 
 # Recency weighting: exponential decay halflife for MOS error resampling
 # Recent errors are more relevant (current weather regime persistence)
-RECENCY_HALFLIFE_DAYS = 5.0    # Half-weight after 5 days
+RECENCY_HALFLIFE_DAYS = 3.0    # Half-weight after 3 days (tighter = adapts faster to regime shifts)
+
+# Residual bias correction: if the last N days show consistent directional error,
+# apply an additional shift on top of MOS to correct for regime drift.
+# This catches cases where the 14-day window still lags a warming/cooling trend.
+RESIDUAL_BIAS_WINDOW = 5       # Days to compute residual bias over
+RESIDUAL_BIAS_MAX = 3.0        # Cap residual correction at ±3° to avoid overcorrection
 
 # WU forecast std by lead days (in °C; scaled ×1.8 for °F cities)
-# Tightened — WU forecasts their own station; their error is small short-range.
-WU_LEAD_STD = {0: 0.4, 1: 0.7, 2: 1.2, 3: 1.8}
-WU_LEAD_STD_DEFAULT = 2.2
+# Lead 0-1: WU is accurate (their own station, short-range)
+# Lead 2+: WU 5-day forecast degrades — widen significantly so WU doesn't
+# over-anchor the distribution when its own forecast is unreliable.
+WU_LEAD_STD = {0: 0.4, 1: 0.7, 2: 2.0, 3: 2.8}
+WU_LEAD_STD_DEFAULT = 3.5
 
 # Total target samples for probability estimation
 N_TARGET_SAMPLES = 1000
+
+# Minimum number of paired WU forecast+actual observations before we trust
+# the per-city std estimate over the global fallback table
+WU_CITY_STD_MIN_PAIRS = 5
+
+# Module-level cache: {city_key: {lead_days: std}} — populated once per process
+_wu_city_std_cache: Dict[str, Dict[int, float]] = {}
+
+
+def compute_wu_lead_std_per_city(city_key: str) -> Dict[int, float]:
+    """
+    Compute per-city WU forecast std by lead day from logged forecast+actual pairs.
+
+    Returns {lead_days: std_in_native_units} for leads with enough data.
+    Falls back to global WU_LEAD_STD for leads with < WU_CITY_STD_MIN_PAIRS pairs.
+
+    The std is in the city's native units (°F for US cities, °C for others).
+    No scaling needed — the data is already in native units.
+    """
+    if city_key in _wu_city_std_cache:
+        return _wu_city_std_cache[city_key]
+
+    try:
+        from .datalog import load_wu_forecast_errors
+        errors_by_lead = load_wu_forecast_errors(
+            city_key, max_lead=3, min_pairs=WU_CITY_STD_MIN_PAIRS
+        )
+    except Exception:
+        _wu_city_std_cache[city_key] = {}
+        return {}
+
+    result: Dict[int, float] = {}
+    for lead, errors in errors_by_lead.items():
+        if len(errors) < WU_CITY_STD_MIN_PAIRS:
+            continue
+        std = float(np.std(errors, ddof=1))
+        # Sanity bounds: never tighter than 0.3° or wider than 6°
+        std = float(np.clip(std, 0.3, 6.0))
+        result[lead] = std
+
+    _wu_city_std_cache[city_key] = result
+    return result
 
 
 # ─── Data Structures ─────────────────────────────────────────────────────────
@@ -471,16 +521,25 @@ def generate_mos_samples(
     has_wu = wu_forecast_temp is not None
     wu_frac = 0.0
     if has_wu:
-        wu_frac_by_lead = {0: 0.35, 1: 0.30, 2: 0.22, 3: 0.12}
+        wu_frac_by_lead = {0: 0.45, 1: 0.40, 2: 0.25, 3: 0.12}
         wu_frac = wu_frac_by_lead.get(lead_days, 0.07)
 
-        # Dynamic WU boost: measure disagreement between WU and model consensus
-        model_means = []
+        # Dynamic WU boost: measure disagreement between WU and bias-corrected model consensus
+        # Use bias-corrected means (not raw) to avoid inflating disagreement for high-bias models
+        # (e.g. GFS deterministic is +3°F warmer than ensemble mean at US stations)
+        corrected_means = []
         for model, raw_members in ensemble_by_model.items():
             if raw_members:
-                model_means.append(float(np.mean(raw_members)))
-        if model_means:
-            consensus = float(np.mean(model_means))
+                profile = mos.profiles.get(model)
+                raw_mean = float(np.mean(raw_members))
+                if profile:
+                    # Subtract ensemble-space bias: mean_bias - det_ens_offset
+                    ens_bias = profile.mean_bias - profile.det_ens_offset
+                    corrected_means.append(raw_mean - ens_bias)
+                else:
+                    corrected_means.append(raw_mean)
+        if corrected_means:
+            consensus = float(np.mean(corrected_means))
             city = CITIES.get(mos.city_key)
             scale = 1.8 if (city and city.unit == "F") else 1.0
             disagreement = abs(wu_forecast_temp - consensus) / scale  # in °C
@@ -541,17 +600,55 @@ def generate_mos_samples(
 
     # ── 3. WU forecast injection (resolution source's own prediction) ──
     if has_wu and n_wu > 0:
-        std_base = WU_LEAD_STD.get(lead_days, WU_LEAD_STD_DEFAULT)
-        city = CITIES.get(mos.city_key)
-        if city and city.unit == "F":
-            std_base *= 1.8
+        # Use per-city calibrated std when available (≥5 paired observations),
+        # otherwise fall back to global table (scaled ×1.8 for °F cities).
+        city_wu_std = compute_wu_lead_std_per_city(mos.city_key)
+        if lead_days in city_wu_std:
+            std_base = city_wu_std[lead_days]
+        else:
+            std_base = WU_LEAD_STD.get(lead_days, WU_LEAD_STD_DEFAULT)
+            city = CITIES.get(mos.city_key)
+            if city and city.unit == "F":
+                std_base *= 1.8
         wu_samples = rng.normal(wu_forecast_temp, std_base, size=n_wu)
         all_samples.extend(wu_samples.tolist())
 
     if not all_samples:
         return np.array([], dtype=np.float64)
 
-    return np.array(all_samples, dtype=np.float64)
+    result = np.array(all_samples, dtype=np.float64)
+
+    # ── 4. Residual bias correction (regime drift correction) ──
+    # Only apply when WU forecast is NOT available. When WU is present, it already
+    # anchors the distribution to the resolution source's own prediction — applying
+    # an additional residual correction on top causes overcorrection for high-bias
+    # cities (e.g. Buenos Aires -3.4°C bias pushes samples 3°C too warm).
+    # When WU is absent, the residual catches warming/cooling trends the MOS lags.
+    if not has_wu:
+        residual_sum = 0.0
+        residual_weight = 0.0
+        for model, raw_members in ensemble_by_model.items():
+            profile = mos.profiles.get(model)
+            if not profile or len(profile.errors) < RESIDUAL_BIAS_WINDOW:
+                continue
+            # Recent adjusted errors (ensemble space)
+            offset = profile.det_ens_offset
+            recent = [e - offset for e in profile.errors[-RESIDUAL_BIAS_WINDOW:]]
+            recent_mean = float(np.mean(recent))
+            # residual = how much our corrected samples are still off on average
+            # (positive = we're still running hot, negative = still running cold)
+            residual_sum += recent_mean * profile.skill_weight
+            residual_weight += profile.skill_weight
+
+        if residual_weight > 0:
+            residual_bias = residual_sum / residual_weight
+            # Cap to avoid overcorrection
+            residual_bias = float(np.clip(residual_bias, -RESIDUAL_BIAS_MAX, RESIDUAL_BIAS_MAX))
+            # Only apply if meaningful (> 0.3° to avoid noise)
+            if abs(residual_bias) > 0.3:
+                result = result - residual_bias
+
+    return result
 
 
 # ─── MOS Bucket Probabilities ────────────────────────────────────────────────

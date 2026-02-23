@@ -40,8 +40,10 @@ ACTUALS_DIR = DATA_ROOT / "actuals"
 CURRENT_DIR = DATA_ROOT / "current"
 FORECASTS_DIR = DATA_ROOT / "forecasts"
 
+WU_FORECASTS_DIR = DATA_ROOT / "wu_forecasts"
+
 ALL_DIRS = [ENSEMBLE_DIR, DETERMINISTIC_DIR, MARKETS_DIR, ACTUALS_DIR,
-            CURRENT_DIR, FORECASTS_DIR]
+            CURRENT_DIR, FORECASTS_DIR, WU_FORECASTS_DIR]
 
 
 def _ensure_dirs():
@@ -437,6 +439,108 @@ def log_forecast(
         data["snapshots"] = data["snapshots"][-20:]
 
     _save(path, data)
+
+
+# ─── WU Forecast Logging (for per-city WU error calibration) ────────────────
+
+def log_wu_forecast(
+    city_key: str,
+    target_date: date,
+    forecast_high: int,
+    lead_days: int,
+    fetch_date: Optional[date] = None,
+):
+    """
+    Log WU's own forecast for a future date, recorded at fetch time.
+
+    File: wu_forecasts/{city_key}_{target_date}.json
+    Each entry records what WU predicted on a given fetch_date (lead_days ahead).
+    Once the actual is known, we can compute error = actual - forecast.
+
+    Stored as:
+    {
+      "city_key": "miami",
+      "target_date": "2026-02-24",
+      "forecasts": [
+        {"fetch_date": "2026-02-23", "lead_days": 1, "forecast_high": 78, "logged_at": "..."},
+        {"fetch_date": "2026-02-22", "lead_days": 2, "forecast_high": 76, "logged_at": "..."},
+        ...
+      ]
+    }
+    """
+    _ensure_dirs()
+    path = _file_path(WU_FORECASTS_DIR, city_key, target_date)
+    data = _load_existing(path)
+
+    if "forecasts" not in data:
+        data["city_key"] = city_key
+        data["target_date"] = target_date.isoformat()
+        data["forecasts"] = []
+
+    fd = (fetch_date or datetime.now(timezone.utc).date()).isoformat()
+
+    # Avoid duplicate entries for same fetch_date+lead_days
+    data["forecasts"] = [
+        e for e in data["forecasts"]
+        if not (e.get("fetch_date") == fd and e.get("lead_days") == lead_days)
+    ]
+    data["forecasts"].append({
+        "fetch_date": fd,
+        "lead_days": lead_days,
+        "forecast_high": forecast_high,
+        "logged_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    _save(path, data)
+
+
+def load_wu_forecast_errors(
+    city_key: str,
+    max_lead: int = 3,
+    min_pairs: int = 3,
+) -> Dict[int, List[float]]:
+    """
+    Load paired WU forecast vs WU actual errors for a city, grouped by lead day.
+
+    Returns {lead_days: [errors]} where error = actual - forecast.
+    Only includes pairs where both forecast and actual are available.
+    Requires at least min_pairs to include a lead day.
+    """
+    if not WU_FORECASTS_DIR.exists():
+        return {}
+
+    errors_by_lead: Dict[int, List[float]] = {}
+
+    for fc_file in sorted(WU_FORECASTS_DIR.glob(f"{city_key}_*.json")):
+        try:
+            fc_data = json.loads(fc_file.read_text())
+            target_date_str = fc_data.get("target_date")
+            if not target_date_str:
+                continue
+            td = date.fromisoformat(target_date_str)
+
+            # Load actual for this date
+            actual = load_logged_actual(city_key, td)
+            if actual is None:
+                continue
+
+            for entry in fc_data.get("forecasts", []):
+                lead = entry.get("lead_days")
+                fc_high = entry.get("forecast_high")
+                if lead is None or fc_high is None or lead > max_lead:
+                    continue
+                error = float(actual) - float(fc_high)
+                if lead not in errors_by_lead:
+                    errors_by_lead[lead] = []
+                errors_by_lead[lead].append(error)
+        except Exception:
+            continue
+
+    # Filter leads with insufficient data
+    return {
+        lead: errs for lead, errs in errors_by_lead.items()
+        if len(errs) >= min_pairs
+    }
 
 
 # ─── Data Loading (for future use in MOS/calibration) ───────────────────────

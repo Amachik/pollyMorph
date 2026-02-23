@@ -1,367 +1,379 @@
 {
   "toronto": {
     "city_key": "toronto",
-    "overall_bias": -1.39,
-    "overall_rmse": 2.1,
-    "last_updated": "2026-02-18T11:01:12.551276+00:00",
+    "overall_bias": -0.26,
+    "overall_rmse": 0.83,
+    "last_updated": "2026-02-23T04:39:05.234101+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -2.62,
-        "rmse": 2.85,
-        "weight": 0.1463,
-        "n_days": 3
+        "mean_bias": -0.44,
+        "rmse": 0.9,
+        "weight": 0.2385,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -2.69,
-        "rmse": 3.49,
-        "weight": 0.0976,
-        "n_days": 3
+        "mean_bias": -0.91,
+        "rmse": 1.2,
+        "weight": 0.1342,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -1.44,
-        "rmse": 1.69,
-        "weight": 0.4162,
+        "mean_bias": -0.22,
+        "rmse": 0.6,
+        "weight": 0.5367,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -0.42,
-        "rmse": 1.87,
-        "weight": 0.3399,
-        "n_days": 3
+        "mean_bias": 0.96,
+        "rmse": 1.46,
+        "weight": 0.0906,
+        "n_days": 4
       }
     }
   },
   "ankara": {
     "city_key": "ankara",
-    "overall_bias": 0.1,
-    "overall_rmse": 0.66,
-    "last_updated": "2026-02-18T11:00:06.424218+00:00",
+    "overall_bias": -0.52,
+    "overall_rmse": 0.8,
+    "last_updated": "2026-02-23T04:38:04.835228+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": 0.27,
-        "rmse": 0.59,
-        "weight": 0.347,
-        "n_days": 3
+        "mean_bias": -0.19,
+        "rmse": 0.67,
+        "weight": 0.4064,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -1.33,
-        "rmse": 1.38,
-        "weight": 0.0634,
-        "n_days": 3
+        "mean_bias": -2.07,
+        "rmse": 2.09,
+        "weight": 0.0418,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": 0.08,
-        "rmse": 0.53,
-        "weight": 0.43,
+        "mean_bias": -0.92,
+        "rmse": 0.98,
+        "weight": 0.19,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": 0.34,
-        "rmse": 0.87,
-        "weight": 0.1596,
-        "n_days": 3
+        "mean_bias": -0.51,
+        "rmse": 0.71,
+        "weight": 0.3619,
+        "n_days": 4
       }
     }
   },
   "atlanta": {
     "city_key": "atlanta",
-    "overall_bias": -2.46,
-    "overall_rmse": 2.71,
-    "last_updated": "2026-02-18T11:00:07.820361+00:00",
+    "overall_bias": 1.08,
+    "overall_rmse": 4.45,
+    "last_updated": "2026-02-23T04:38:06.127046+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -2.16,
-        "rmse": 2.32,
-        "weight": 0.3651,
-        "n_days": 3
+        "mean_bias": 0.31,
+        "rmse": 4.73,
+        "weight": 0.2323,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -2.3,
-        "rmse": 2.34,
-        "weight": 0.3589,
-        "n_days": 3
+        "mean_bias": 0.15,
+        "rmse": 4.65,
+        "weight": 0.2403,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -3.23,
-        "rmse": 3.29,
-        "weight": 0.1815,
+        "mean_bias": 3.1,
+        "rmse": 6.79,
+        "weight": 0.1127,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -2.8,
-        "rmse": 4.56,
-        "weight": 0.0945,
-        "n_days": 3
+        "mean_bias": 1.49,
+        "rmse": 3.54,
+        "weight": 0.4147,
+        "n_days": 4
       }
     }
   },
   "buenos_aires": {
     "city_key": "buenos_aires",
-    "overall_bias": -2.16,
-    "overall_rmse": 2.32,
-    "last_updated": "2026-02-18T11:00:09.087363+00:00",
+    "overall_bias": -2.3,
+    "overall_rmse": 2.35,
+    "last_updated": "2026-02-23T04:38:07.372104+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -4.47,
+        "mean_bias": -4.54,
         "rmse": 4.68,
-        "weight": 0.0709,
-        "n_days": 3
+        "weight": 0.0747,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -1.61,
-        "rmse": 1.78,
-        "weight": 0.49,
-        "n_days": 3
+        "mean_bias": -2.06,
+        "rmse": 2.09,
+        "weight": 0.3746,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -1.96,
-        "rmse": 2.12,
-        "weight": 0.3454,
+        "mean_bias": -1.8,
+        "rmse": 1.83,
+        "weight": 0.4886,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -3.99,
-        "rmse": 4.07,
-        "weight": 0.0937,
-        "n_days": 3
+        "mean_bias": -5.01,
+        "rmse": 5.13,
+        "weight": 0.0622,
+        "n_days": 4
       }
     }
   },
   "chicago": {
     "city_key": "chicago",
-    "overall_bias": -1.53,
-    "overall_rmse": 2.37,
-    "last_updated": "2026-02-18T11:00:21.515780+00:00",
+    "overall_bias": 0.83,
+    "overall_rmse": 1.69,
+    "last_updated": "2026-02-23T04:38:08.655916+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -2.57,
-        "rmse": 2.73,
-        "weight": 0.3828,
-        "n_days": 3
+        "mean_bias": 0.43,
+        "rmse": 1.19,
+        "weight": 0.5651,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -0.89,
-        "rmse": 2.15,
-        "weight": 0.6172,
-        "n_days": 2
+        "mean_bias": 0.59,
+        "rmse": 2.04,
+        "weight": 0.1923,
+        "n_days": 4
+      },
+      "icon_seamless": {
+        "mean_bias": 1.87,
+        "rmse": 2.47,
+        "weight": 0.1312,
+        "n_days": 3
+      },
+      "gem_global": {
+        "mean_bias": 2.06,
+        "rmse": 2.68,
+        "weight": 0.1114,
+        "n_days": 4
       }
     }
   },
   "dallas": {
     "city_key": "dallas",
-    "overall_bias": -2.17,
-    "overall_rmse": 2.55,
-    "last_updated": "2026-02-18T11:04:54.109499+00:00",
+    "overall_bias": 1.36,
+    "overall_rmse": 5.69,
+    "last_updated": "2026-02-23T04:38:21.042235+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -2.68,
-        "rmse": 2.79,
-        "weight": 0.2127,
+        "mean_bias": 0.65,
+        "rmse": 5.36,
+        "weight": 0.3977,
         "n_days": 3
       },
       "gfs_seamless": {
-        "mean_bias": -1.88,
-        "rmse": 2.14,
-        "weight": 0.3616,
-        "n_days": 3
+        "mean_bias": 0.7,
+        "rmse": 4.96,
+        "weight": 0.4644,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -1.8,
-        "rmse": 2.66,
-        "weight": 0.234,
-        "n_days": 3
-      },
-      "gem_global": {
-        "mean_bias": -2.59,
-        "rmse": 2.94,
-        "weight": 0.1916,
-        "n_days": 3
+        "mean_bias": 5.63,
+        "rmse": 9.1,
+        "weight": 0.138,
+        "n_days": 2
       }
     }
   },
   "london": {
     "city_key": "london",
-    "overall_bias": -0.81,
-    "overall_rmse": 0.95,
-    "last_updated": "2026-02-18T11:04:55.425824+00:00",
+    "overall_bias": -0.57,
+    "overall_rmse": 0.77,
+    "last_updated": "2026-02-23T04:51:11.592552+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -1.1,
-        "rmse": 1.16,
-        "weight": 0.1891,
-        "n_days": 3
+        "mean_bias": -0.74,
+        "rmse": 0.81,
+        "weight": 0.2537,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -1.24,
-        "rmse": 1.29,
-        "weight": 0.1529,
-        "n_days": 3
+        "mean_bias": -1.29,
+        "rmse": 1.38,
+        "weight": 0.0874,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -0.5,
-        "rmse": 0.67,
-        "weight": 0.5668,
+        "mean_bias": -0.31,
+        "rmse": 0.56,
+        "weight": 0.5308,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -1.4,
-        "rmse": 1.67,
-        "weight": 0.0912,
-        "n_days": 3
+        "mean_bias": -0.84,
+        "rmse": 1.14,
+        "weight": 0.1281,
+        "n_days": 4
       }
     }
   },
   "miami": {
     "city_key": "miami",
-    "overall_bias": -0.57,
-    "overall_rmse": 2.06,
-    "last_updated": "2026-02-18T11:01:04.940076+00:00",
+    "overall_bias": -0.66,
+    "overall_rmse": 2.26,
+    "last_updated": "2026-02-23T04:51:12.829420+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -3.81,
-        "rmse": 3.82,
-        "weight": 0.0865,
-        "n_days": 2
+        "mean_bias": -1.76,
+        "rmse": 1.86,
+        "weight": 0.4073,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -2.81,
-        "rmse": 2.81,
-        "weight": 0.1599,
-        "n_days": 3
+        "mean_bias": -2.2,
+        "rmse": 2.35,
+        "weight": 0.2551,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -0.24,
-        "rmse": 1.41,
-        "weight": 0.6349,
+        "mean_bias": 1.34,
+        "rmse": 2.22,
+        "weight": 0.2859,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": 3.01,
-        "rmse": 3.26,
-        "weight": 0.1188,
-        "n_days": 3
+        "mean_bias": 4.61,
+        "rmse": 5.22,
+        "weight": 0.0517,
+        "n_days": 4
       }
     }
   },
   "nyc": {
     "city_key": "nyc",
-    "overall_bias": -0.18,
-    "overall_rmse": 1.58,
-    "last_updated": "2026-02-18T11:01:06.291270+00:00",
+    "overall_bias": 0.58,
+    "overall_rmse": 1.23,
+    "last_updated": "2026-02-23T04:39:01.456241+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -4.16,
-        "rmse": 4.85,
-        "weight": 0.0422,
-        "n_days": 3
+        "mean_bias": 2.49,
+        "rmse": 3.65,
+        "weight": 0.0493,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -3.13,
-        "rmse": 4.05,
-        "weight": 0.0606,
-        "n_days": 3
+        "mean_bias": 2.96,
+        "rmse": 4.01,
+        "weight": 0.0408,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": 0.41,
-        "rmse": 1.08,
-        "weight": 0.852,
+        "mean_bias": 3.46,
+        "rmse": 5.37,
+        "weight": 0.0228,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -3.54,
-        "rmse": 4.69,
-        "weight": 0.0452,
-        "n_days": 3
+        "mean_bias": 0.29,
+        "rmse": 0.86,
+        "weight": 0.8872,
+        "n_days": 4
       }
     }
   },
   "seattle": {
     "city_key": "seattle",
-    "overall_bias": -0.12,
-    "overall_rmse": 2.41,
-    "last_updated": "2026-02-18T11:01:07.695816+00:00",
+    "overall_bias": -2.66,
+    "overall_rmse": 3.24,
+    "last_updated": "2026-02-23T04:39:02.715101+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -1.14,
-        "rmse": 3.19,
-        "weight": 0.15,
-        "n_days": 3
+        "mean_bias": -2.63,
+        "rmse": 2.98,
+        "weight": 0.3085,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": 0.71,
-        "rmse": 1.85,
-        "weight": 0.4459,
-        "n_days": 3
+        "mean_bias": -1.89,
+        "rmse": 2.67,
+        "weight": 0.3843,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -0.77,
-        "rmse": 2.94,
-        "weight": 0.1766,
+        "mean_bias": -4.17,
+        "rmse": 4.68,
+        "weight": 0.1251,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -0.57,
-        "rmse": 2.59,
-        "weight": 0.2275,
-        "n_days": 3
+        "mean_bias": -3.29,
+        "rmse": 3.88,
+        "weight": 0.182,
+        "n_days": 4
       }
     }
   },
   "seoul": {
     "city_key": "seoul",
-    "overall_bias": -0.85,
-    "overall_rmse": 0.92,
-    "last_updated": "2026-02-18T11:01:08.945725+00:00",
+    "overall_bias": -3.63,
+    "overall_rmse": 3.81,
+    "last_updated": "2026-02-23T04:39:03.965170+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": -0.56,
-        "rmse": 0.64,
-        "weight": 0.6114,
-        "n_days": 3
+        "mean_bias": -2.8,
+        "rmse": 2.95,
+        "weight": 0.4343,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -1.58,
-        "rmse": 1.66,
-        "weight": 0.0909,
-        "n_days": 3
+        "mean_bias": -4.52,
+        "rmse": 4.8,
+        "weight": 0.164,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": -1.08,
-        "rmse": 1.13,
-        "weight": 0.1961,
+        "mean_bias": -4.17,
+        "rmse": 4.26,
+        "weight": 0.2083,
         "n_days": 3
       },
       "gem_global": {
-        "mean_bias": -1.45,
-        "rmse": 1.57,
-        "weight": 0.1016,
-        "n_days": 3
+        "mean_bias": -4.14,
+        "rmse": 4.42,
+        "weight": 0.1934,
+        "n_days": 4
       }
     }
   },
   "wellington": {
     "city_key": "wellington",
-    "overall_bias": 1.07,
-    "overall_rmse": 2.29,
-    "last_updated": "2026-02-18T11:01:24.996739+00:00",
+    "overall_bias": -0.55,
+    "overall_rmse": 0.59,
+    "last_updated": "2026-02-23T04:39:06.479736+00:00",
     "models": {
       "ecmwf_ifs025": {
-        "mean_bias": 2.36,
-        "rmse": 2.36,
-        "weight": 0.3146,
-        "n_days": 1
+        "mean_bias": -1.81,
+        "rmse": 1.9,
+        "weight": 0.0444,
+        "n_days": 4
       },
       "gfs_seamless": {
-        "mean_bias": -0.82,
-        "rmse": 2.11,
-        "weight": 0.3935,
-        "n_days": 2
+        "mean_bias": -3.17,
+        "rmse": 3.19,
+        "weight": 0.0158,
+        "n_days": 4
       },
       "icon_seamless": {
-        "mean_bias": 2.22,
-        "rmse": 2.45,
-        "weight": 0.2919,
-        "n_days": 2
+        "mean_bias": -0.39,
+        "rmse": 0.42,
+        "weight": 0.9092,
+        "n_days": 3
+      },
+      "gem_global": {
+        "mean_bias": -2.23,
+        "rmse": 2.29,
+        "weight": 0.0306,
+        "n_days": 4
       }
     }
   }

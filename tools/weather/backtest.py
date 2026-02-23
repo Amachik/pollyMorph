@@ -323,6 +323,9 @@ async def backtest(days_back: int = 7, verbose: bool = False):
             cal = calibrations.get(rm.city_key)
             async with _fc_sem:
                 try:
+                    # Use the day BEFORE the target as reference (simulates 1-day-ahead forecast).
+                    # For markets resolved N days ago, this gives N-day lead time, which is
+                    # more realistic than always using 1-day lead for all historical markets.
                     ref_date = rm.target_date - timedelta(days=1)
                     forecast = await get_forecast(
                         session, rm.city_key, rm.target_date,

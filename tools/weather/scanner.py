@@ -22,15 +22,16 @@ import aiohttp
 from .config import (
     CITIES, MIN_EDGE, MAX_EDGE, KELLY_FRACTION, MAX_BET_USDC, MIN_LIQUIDITY,
     TOP_N_BUCKETS, MIN_FORECAST_PROB, SAME_DAY_MIN_HOURS, SPREAD_EDGE_BOOST,
-    MAX_BETS_PER_MARKET, MARKET_DISAGREE_CAP,
+    MAX_BETS_PER_MARKET, MARKET_DISAGREE_CAP, MAX_LEAD_DAYS,
 )
 from .markets import WeatherMarket, WeatherOutcome, discover_weather_markets, market_summary
 from .forecast import (
     get_forecast, calculate_bucket_probabilities, ForecastResult,
     get_current_weather, sanity_check_probabilities, CurrentWeather,
 )
+from .wunderground import fetch_wu_forecast_all_days, WUForecast
 from .calibration import get_or_compute_calibration, CityCalibration
-from .datalog import log_market, log_forecast
+from .datalog import log_market, log_forecast, log_wu_forecast
 
 import pytz
 
@@ -88,7 +89,8 @@ def display_results(
     verbose: bool = False,
     sanity_warnings: List[str] = None,
     observe_only: bool = False,
-):
+    city_edge_penalty: float = 0.0,
+) -> List[Tuple]:  # (outcome, forecast_prob, edge, bet, ev, forecast_mean, forecast_std)
     """Display edge analysis for a single weather market."""
     city = CITIES.get(market.city_key)
     city_name = city.name if city else market.city_key
@@ -111,11 +113,12 @@ def display_results(
     top_n_labels = {label for label, _ in ranked[:TOP_N_BUCKETS]}
 
     # Spread penalty: if our top-2 are very close, we're uncertain
-    effective_min_edge = MIN_EDGE
+    # City penalty: raise threshold for cities with poor historical accuracy
+    effective_min_edge = MIN_EDGE + city_edge_penalty
     if len(ranked) >= 2:
         spread = ranked[0][1] - ranked[1][1]
         if spread < 0.05:  # Top-2 within 5% of each other
-            effective_min_edge = MIN_EDGE + SPREAD_EDGE_BOOST
+            effective_min_edge += SPREAD_EDGE_BOOST
 
     # Column headers
     print(f"  {'Bucket':<22} {'Forecast':>9} {'Market':>9} {'Edge':>9} {'EV/bet':>9} {'Signal':<18}")
@@ -152,7 +155,7 @@ def display_results(
             ev = expected_value(forecast_prob, market_prob, bet)
             if bet >= 1.0:
                 signal = f"🟢 BUY ${bet:.1f}"
-                opportunities.append((outcome, forecast_prob, edge, bet, ev))
+                opportunities.append((outcome, forecast_prob, edge, bet, ev, forecast.mean, forecast.std))
                 if edge > best_edge:
                     best_edge = edge
                     best_outcome = outcome
@@ -194,7 +197,7 @@ def display_results(
     # Limit bets per market to reduce correlated losses
     if len(opportunities) > MAX_BETS_PER_MARKET:
         # Keep the ones with highest edge
-        opportunities.sort(key=lambda x: x[2], reverse=True)  # x[2] = edge
+        opportunities.sort(key=lambda x: x[2], reverse=True)  # x[2] = edge (unchanged)
         dropped = opportunities[MAX_BETS_PER_MARKET:]
         opportunities = opportunities[:MAX_BETS_PER_MARKET]
         if verbose:
@@ -240,6 +243,66 @@ def log_edges_csv(
             ])
 
 
+# ─── Per-City Performance Tracking ───────────────────────────────────────────
+
+def load_city_performance(min_bets: int = 3) -> Dict[str, Dict]:
+    """
+    Load per-city win/loss stats from position history.
+    Returns {city_key: {'wins': N, 'losses': N, 'win_rate': float, 'edge_penalty': float}}
+
+    edge_penalty: additional edge required for cities with poor track records.
+    Cities with <33% win rate get a penalty; cities with >60% get a bonus.
+    Only applied when we have >= min_bets resolved positions for that city.
+    """
+    import json as _json
+    from pathlib import Path
+    positions_file = Path(__file__).parent.parent.parent / "weather_positions.json"
+    if not positions_file.exists():
+        return {}
+
+    try:
+        with open(positions_file) as f:
+            positions = _json.load(f)
+    except Exception:
+        return {}
+
+    city_stats: Dict[str, Dict] = {}
+    for pos in positions.values():
+        status = pos.get("status", "")
+        if status not in ("won", "lost"):
+            continue
+        ck = pos.get("city_key", "")
+        if not ck:
+            continue
+        if ck not in city_stats:
+            city_stats[ck] = {"wins": 0, "losses": 0}
+        if status == "won":
+            city_stats[ck]["wins"] += 1
+        else:
+            city_stats[ck]["losses"] += 1
+
+    result = {}
+    for ck, s in city_stats.items():
+        total = s["wins"] + s["losses"]
+        if total < min_bets:
+            result[ck] = {"wins": s["wins"], "losses": s["losses"], "total": total,
+                          "win_rate": None, "edge_penalty": 0.0}
+            continue
+        win_rate = s["wins"] / total
+        # Penalty: +4% edge required per 10% below 40% win rate
+        # Bonus: -2% edge required per 10% above 60% win rate (capped at -6%)
+        if win_rate < 0.40:
+            penalty = (0.40 - win_rate) * 0.40  # e.g. 20% win rate → +8% penalty
+        elif win_rate > 0.60:
+            penalty = -(win_rate - 0.60) * 0.20  # e.g. 80% win rate → -4% bonus
+            penalty = max(penalty, -0.06)
+        else:
+            penalty = 0.0
+        result[ck] = {"wins": s["wins"], "losses": s["losses"], "total": total,
+                      "win_rate": win_rate, "edge_penalty": round(penalty, 3)}
+    return result
+
+
 # ─── Main Scanner ─────────────────────────────────────────────────────────────
 
 async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: bool = False):
@@ -252,6 +315,17 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
 
     csv_path = os.path.join(os.path.dirname(__file__), "..", "weather_edges.csv") if csv_log else None
 
+    # Load per-city performance stats to adjust edge thresholds
+    city_performance = load_city_performance(min_bets=1)
+    if city_performance:
+        print("\n📊 City performance (edge adjustments):")
+        for ck, perf in sorted(city_performance.items()):
+            if perf["win_rate"] is not None:
+                penalty_str = f"{perf['edge_penalty']:+.0%}" if perf["edge_penalty"] != 0 else "±0%"
+                flag = "🔴" if perf["edge_penalty"] > 0.04 else ("🟡" if perf["edge_penalty"] > 0 else ("🟢" if perf["edge_penalty"] < 0 else "⚪"))
+                print(f"   {flag} {ck:15s}: {perf['wins']}W/{perf['losses']}L "
+                      f"({perf['win_rate']:.0%} wr) → edge adj {penalty_str}")
+
     async with aiohttp.ClientSession() as session:
         # Step 1: Discover markets
         print("\n📡 Discovering weather markets...")
@@ -262,11 +336,12 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
             print("\n❌ No active weather markets found!")
             return []
 
-        # Group markets by status
+        # Group markets by status and filter by lead time
         today = now.date()
+        markets = [m for m in markets if (m.target_date - today).days <= MAX_LEAD_DAYS]
         active = [m for m in markets if m.target_date <= today]
         upcoming = [m for m in markets if m.target_date > today]
-        print(f"   Active (today): {len(active)}, Upcoming: {len(upcoming)}")
+        print(f"   Active (today): {len(active)}, Upcoming (≤{MAX_LEAD_DAYS}d): {len(upcoming)}")
 
         for m in sorted(markets, key=lambda x: (x.target_date, x.city_key)):
             print(f"   • {market_summary(m)}")
@@ -289,7 +364,50 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
             else:
                 print(f"   ⚠️  {ck}: no calibration data")
 
-        # Step 3: Fetch forecasts and analyze edges
+        # Step 3: Pre-fetch WU forecasts per city (1 API call per city covers all dates)
+        # This avoids N×M WU calls (N cities × M markets per city)
+        print(f"\n🌦️  Pre-fetching WU forecasts ({len(city_keys)} cities)...")
+        wu_forecasts_by_city: Dict[str, Dict] = {}  # city_key → {date: WUForecast}
+        async def _fetch_wu_city(ck: str):
+            try:
+                forecasts = await fetch_wu_forecast_all_days(session, ck)
+                return ck, {fc.target_date: fc for fc in forecasts}
+            except Exception:
+                return ck, {}
+        wu_results = await asyncio.gather(*[_fetch_wu_city(ck) for ck in city_keys])
+        for ck, fc_map in wu_results:
+            wu_forecasts_by_city[ck] = fc_map
+            if fc_map:
+                dates_str = ", ".join(str(d) for d in sorted(fc_map.keys()))
+                print(f"   ✅ {CITIES[ck].name if ck in CITIES else ck}: {len(fc_map)} days ({dates_str})")
+                # Log each WU forecast for later error calibration
+                for fc_date, wu_fc in fc_map.items():
+                    try:
+                        log_wu_forecast(
+                            ck, fc_date, wu_fc.high_temp,
+                            lead_days=wu_fc.lead_days,
+                        )
+                    except Exception:
+                        pass
+            else:
+                print(f"   ⚠️  {CITIES[ck].name if ck in CITIES else ck}: no WU forecast")
+
+        # Pre-fetch current weather for cities with today's markets (1 call per city)
+        today_city_keys = list(set(m.city_key for m in markets if m.target_date == today))
+        current_weather_cache: Dict[str, CurrentWeather] = {}
+        if today_city_keys:
+            print(f"\n🌡️  Pre-fetching current weather ({len(today_city_keys)} cities)...")
+            async def _fetch_current(ck: str):
+                try:
+                    return ck, await get_current_weather(session, ck)
+                except Exception:
+                    return ck, None
+            cw_results = await asyncio.gather(*[_fetch_current(ck) for ck in today_city_keys])
+            for ck, cw in cw_results:
+                if cw:
+                    current_weather_cache[ck] = cw
+
+        # Step 4: Fetch forecasts and analyze edges
         all_opportunities = []
 
         # Sort: upcoming markets first (more time to trade), then by city
@@ -306,14 +424,15 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                     print(f"\n   ⏭️  Skipping {city.name} {market.target_date} — low liquidity (${market.liquidity:.0f})")
                 continue
 
-            # For today's markets: fetch current weather and estimate hours remaining
+            # For today's markets: use cached current weather (no extra API call)
             current_high_val = None
             hours_remaining_val = None
             sanity_warnings = []
             skip_same_day = False
+            current = None
 
             if market.target_date == today:
-                current = await get_current_weather(session, market.city_key)
+                current = current_weather_cache.get(market.city_key)
                 if current:
                     current_high_val = current.daily_high_so_far
                     # Estimate hours of potential warming remaining
@@ -324,11 +443,8 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                         hours_remaining_val = max(0.0, peak_hour - local_now.hour - local_now.minute / 60.0)
                     except Exception:
                         hours_remaining_val = 4.0
-                    await asyncio.sleep(0.1)
 
                     # Enhanced same-day detection using hourly trajectory
-                    # If the hourly forecast shows no future hour exceeding the current high,
-                    # the daily high is already locked in — observe only.
                     high_already_in = False
                     if current.forecast_remaining_max is not None:
                         remaining_upside = current.forecast_remaining_max - current_high_val
@@ -349,11 +465,16 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                             print(f"\n   ⏭️  {city.name} {market.target_date} — {reason}")
                         sanity_warnings.append(reason)
 
+            # Look up pre-fetched WU forecast for this city+date
+            prefetched_wu = wu_forecasts_by_city.get(market.city_key, {}).get(market.target_date)
+
             # Fetch forecast with calibration and conditioning
             cal = calibrations.get(market.city_key)
+            wu_str = f", WU={prefetched_wu.high_temp}°" if prefetched_wu else ""
             print(f"\n🌡️  Fetching forecast for {city.name} on {market.target_date}..."
                   f"{' [calibrated]' if cal else ''}"
-                  f"{f' [conditioned: high={current_high_val:.0f}°, {hours_remaining_val:.1f}h left]' if current_high_val is not None else ''}")
+                  f"{f' [conditioned: high={current_high_val:.0f}°, {hours_remaining_val:.1f}h left]' if current_high_val is not None else ''}"
+                  f"{wu_str}")
 
             # Pass hourly trajectory data for smarter Bayesian conditioning
             forecast_remaining_max_val = None
@@ -367,6 +488,7 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
                 current_high=current_high_val,
                 hours_remaining=hours_remaining_val,
                 forecast_remaining_max=forecast_remaining_max_val,
+                prefetched_wu=prefetched_wu,
             )
 
             if not forecast:
@@ -377,15 +499,13 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
             buckets = [o.bucket for o in market.outcomes]
             bucket_probs = calculate_bucket_probabilities(forecast, buckets)
 
-            # Sanity check warnings (post-Bayesian, just for display)
-            if market.target_date == today and current_high_val is not None:
-                current = await get_current_weather(session, market.city_key)
-                if current:
-                    _, extra_warnings = sanity_check_probabilities(
-                        bucket_probs, buckets, current,
-                    )
-                    # Merge: keep skip_same_day warning on top, add current temp info
-                    sanity_warnings = sanity_warnings + extra_warnings
+            # Sanity check warnings (post-Bayesian, just for display) — use cached current
+            if market.target_date == today and current_high_val is not None and current:
+                _, extra_warnings = sanity_check_probabilities(
+                    bucket_probs, buckets, current,
+                )
+                # Merge: keep skip_same_day warning on top, add current temp info
+                sanity_warnings = sanity_warnings + extra_warnings
 
             # Log market data and our forecast to persistent archive
             try:
@@ -403,13 +523,18 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
             except Exception:
                 pass  # Never let logging break scanning
 
+            # Look up per-city edge penalty from historical performance
+            city_perf = city_performance.get(market.city_key, {})
+            city_edge_penalty = city_perf.get("edge_penalty", 0.0)
+
             # Display results (suppress BUY signals for observation-only markets)
             opportunities = display_results(
                 market, forecast, bucket_probs, bankroll, verbose,
                 sanity_warnings, observe_only=skip_same_day,
+                city_edge_penalty=city_edge_penalty,
             )
             if not skip_same_day:
-                all_opportunities.extend([(market, o, fp, e, b, ev) for o, fp, e, b, ev in opportunities])
+                all_opportunities.extend([(market, o, fp, e, b, ev, fm, fs) for o, fp, e, b, ev, fm, fs in opportunities])
 
             # Log to CSV
             if csv_path:
@@ -419,11 +544,11 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
         print("\n" + "=" * 90)
         print(f"  📊 SUMMARY — {len(all_opportunities)} actionable opportunities found")
         if all_opportunities:
-            total_ev = sum(ev for _, _, _, _, _, ev in all_opportunities)
-            total_bet = sum(b for _, _, _, _, b, _ in all_opportunities)
+            total_ev = sum(ev for _, _, _, _, _, ev, _, _ in all_opportunities)
+            total_bet = sum(b for _, _, _, _, b, _, _, _ in all_opportunities)
             print(f"  Total bet: ${total_bet:.2f} | Total EV: ${total_ev:+.2f}")
             print()
-            for market, outcome, fp, edge, bet, ev in sorted(all_opportunities, key=lambda x: -x[3]):
+            for market, outcome, fp, edge, bet, ev, fm, fs in sorted(all_opportunities, key=lambda x: -x[3]):
                 city = CITIES.get(market.city_key)
                 cn = city.name if city else market.city_key
                 print(f"  🟢 {cn} {market.target_date} — BUY \"{outcome.bucket.label}\" "

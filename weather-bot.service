@@ -1,0 +1,24 @@
+[Unit]
+Description=Polymarket Weather Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/pollyMorph
+ExecStart=/home/ubuntu/pollyMorph/venv/bin/python3 -m tools.weather.executor --loop --live --bankroll 164
+Restart=always
+RestartSec=60
+StandardOutput=append:/home/ubuntu/pollyMorph/logs/weather-bot.log
+StandardError=append:/home/ubuntu/pollyMorph/logs/weather-bot.log
+
+# Give the bot time to finish a scan before killing it on stop
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+# Environment — load from .env file in the project root
+EnvironmentFile=/home/ubuntu/pollyMorph/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -9,7 +9,7 @@ from typing import Optional
 # ─── Trading Parameters ──────────────────────────────────────────────────────
 
 # Minimum edge (forecast_prob - market_prob) to consider a trade
-MIN_EDGE = 0.08  # 8%
+MIN_EDGE = 0.12  # 12% (raised from 8% — need higher edge to be profitable at current accuracy)
 
 # Maximum edge — if edge exceeds this, something may be wrong (stale market, bad data)
 MAX_EDGE = 0.45  # 45% (was 60%; huge edges are usually model errors)
@@ -33,7 +33,7 @@ TOP_N_BUCKETS = 3
 
 # Minimum forecast probability on a bucket before we'll bet on it
 # Backtest: bets where our prob < 25% were 0W/17L = pure loss
-MIN_FORECAST_PROB = 0.25  # 25% (was 15%)
+MIN_FORECAST_PROB = 0.30  # 30% (raised from 25% — bets below 30% forecast prob are too uncertain)
 
 # Maximum bets per city+date to limit correlated losses
 # (Toronto, Buenos Aires often had 2-3 losing bets on same market)
@@ -41,11 +41,15 @@ MAX_BETS_PER_MARKET = 2
 
 # Market disagree cap: skip when market price is extremely low
 # Optimized via backtest: 3% keeps big wins (39x Buenos Aires) while filtering garbage
-MARKET_DISAGREE_CAP = 0.03  # Skip if market < 3% regardless of our forecast
+MARKET_DISAGREE_CAP = 0.08  # Skip if market < 8% regardless of our forecast (below 8% the market is almost always right)
 
 # For same-day markets: minimum hours until typical peak (5PM local) to trade
 # Below this, the market already has too much real-time info; skip same-day
 SAME_DAY_MIN_HOURS = 4.0
+
+# Maximum lead time to bet on (days ahead). 0 = today only, 1 = today + tomorrow.
+# Markets 2+ days away have lower forecast accuracy and WU forecasts degrade.
+MAX_LEAD_DAYS = 1
 
 # Spread penalty: if our top-2 buckets are very close in probability,
 # we're uncertain — require a larger edge

@@ -11,6 +11,7 @@ Usage:
 
 import asyncio
 import json
+import math
 import os
 import sys
 import argparse
@@ -404,13 +405,13 @@ def place_order(
     order_price = max(order_price, 0.01)
 
     # Size: number of tokens = USDC / price
-    tokens = bet_size / order_price
+    # Round UP to 2dp so tokens*price >= bet_size (avoids "min size $1" rejection)
+    tokens = math.ceil((bet_size / order_price) * 100) / 100
     if tokens < 1.0:
         return None
 
     # Round to Polymarket's precision
     order_price = round(order_price, 2)
-    tokens = round(tokens, 2)
 
     record = OrderRecord(
         order_id="",
@@ -715,8 +716,8 @@ async def execute_weather_bets(
                     # Add to existing position
                     pos = positions[key]
                     old_total = pos.size
-                    pos.size += bet
-                    pos.tokens += bet / record.price
+                    pos.size += actual_bet
+                    pos.tokens += actual_bet / record.price
                     pos.avg_price = pos.size / pos.tokens if pos.tokens > 0 else record.price
                     pos.order_ids.append(record.order_id)
                 else:
@@ -727,8 +728,8 @@ async def execute_weather_bets(
                         token_id=outcome.token_id,
                         market_id=outcome.market_id,
                         avg_price=record.price,
-                        size=bet,
-                        tokens=bet / record.price,
+                        size=actual_bet,
+                        tokens=actual_bet / record.price,
                         order_ids=[record.order_id],
                         created_at=record.timestamp,
                         status="open",
@@ -737,7 +738,7 @@ async def execute_weather_bets(
                     )
 
                 orders_placed += 1
-                total_invested += bet
+                total_invested += actual_bet
 
         # Rate limit between orders
         await asyncio.sleep(ORDER_COOLDOWN_SECONDS)

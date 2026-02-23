@@ -2014,6 +2014,74 @@ async fn submit_sweep_orders(
     info!("   [BG] Sweep complete: {}/{} orders filled | {:.0} tokens | ${:.2} | {:.0}ms",
           orders_ok, orders_count, tokens_total, cost_total, total_elapsed_ms);
 
+    // ── Ghost-fill detection (incrementNonce exploit) ─────────────────────
+    // After the CLOB confirms a fill, verify the tokens actually landed in our
+    // wallet via the data API. Exploiters call incrementNonce() on the CTF
+    // Exchange to cancel their losing asks after matching — the CLOB reports
+    // size_matched > 0 but on-chain settlement never happens.
+    // If our token balance is 0 after a reported fill, it's a ghost fill.
+    // We set tokens_total=0 so handle_sweep_result discards the position.
+    if tokens_total > 0.0 {
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await; // wait for chain
+        let wallet = executor.wallet_address().to_string();
+        let check_token = match swept_side {
+            SweptSide::Up   => &market.up_token_id,
+            SweptSide::Down => &market.down_token_id,
+        };
+        let pos_url = format!(
+            "https://data-api.polymarket.com/positions?user={}&sizeThreshold=0.1",
+            wallet
+        );
+        let ghost = match executor.http_client().get(&pos_url).send().await {
+            Ok(r) if r.status().is_success() => {
+                match r.json::<serde_json::Value>().await {
+                    Ok(val) => {
+                        let arr = val.as_array()
+                            .or_else(|| val.get("data").and_then(|d| d.as_array()));
+                        if let Some(positions) = arr {
+                            let on_chain: f64 = positions.iter()
+                                .filter(|p| p["asset"].as_str().unwrap_or("") == check_token)
+                                .filter_map(|p| p["size"].as_f64())
+                                .sum();
+                            if on_chain < 0.5 {
+                                warn!("👻 GHOST FILL detected for {} — CLOB reported {:.2} tokens but on-chain balance is {:.4}. incrementNonce exploit suspected.",
+                                      event_slug, tokens_total, on_chain);
+                                true
+                            } else {
+                                info!("   ✅ Ghost-fill check passed: {:.4} tokens confirmed on-chain for {}",
+                                      on_chain, event_slug);
+                                false
+                            }
+                        } else {
+                            warn!("   ⚠️  Ghost-fill check: unexpected positions response shape for {}", event_slug);
+                            false // don't discard on parse failure
+                        }
+                    }
+                    Err(e) => {
+                        warn!("   ⚠️  Ghost-fill check parse error for {}: {}", event_slug, e);
+                        false
+                    }
+                }
+            }
+            _ => {
+                warn!("   ⚠️  Ghost-fill check: data-api unreachable for {}, skipping verification", event_slug);
+                false
+            }
+        };
+        if ghost {
+            return SweepResult {
+                event_slug, market, swept_side, estimated_cost,
+                tokens_total: 0.0, // signal to caller: discard, don't record position
+                cost_total: 0.0,
+                orders_ok: 0,
+                orders_count,
+                total_elapsed_ms,
+                error: Some("ghost fill — incrementNonce exploit detected".to_string()),
+                sell_order_id: None,
+            };
+        }
+    }
+
     SweepResult {
         event_slug, market, swept_side, estimated_cost,
         tokens_total, cost_total, orders_ok, orders_count,

@@ -48,6 +48,12 @@ const EXIT_SELL_PRICE: f64 = 0.98;   // GTC sell — fallback if we enter early;
 // EV at P(win)=0.97: $0.97 - $0.9361 = +$0.034/token
 const FAIR_VALUE_THRESHOLD: f64 = 0.97; // P(win) >= 97%: near-certain outcome
 const EDGE_THRESHOLD: f64 = 0.04;    // fv - ask >= 4¢: stale ask is at least 4¢ below fair value
+/// Maximum allowed disagreement between Chainlink FV and the market's own implied probability.
+/// If Chainlink says UP at 97% but the market is pricing UP at only 40%, the oracle is likely
+/// stale (price reversed after last Chainlink update). Reject the signal to avoid correlated losses.
+/// Example: FV_up=0.97, up_ask=0.25 → market implied UP = 0.25 → disagreement = 0.72 → REJECT.
+/// Calibrated from the Feb 22 loss event: SOL Down FV=0.97, market Down ask=0.25 → all 3 lost.
+const MAX_MARKET_DISAGREEMENT: f64 = 0.40; // Reject if |FV - market_implied| > 0.40
 const RESWEEP_COOLDOWN_MS: u128 = 3000; // Re-sweep same market after 3s cooldown (not permanent block)
 const MAX_BET_USDC: f64 = 10_000.0;    // Hard ceiling — never risk more than $10k in one trade
 const BET_FRACTION: f64 = 0.40;        // Bet 40% of available capital per trade
@@ -800,7 +806,7 @@ impl OracleEngine {
         // Secondary (fallback): bid-based heuristic when Chainlink data is
         // unavailable (e.g. first 10s after startup before first poll).
         let cl_asset = Self::chainlink_asset_for(market.asset);
-        let cl_price_opt = self.chainlink_prices.fresh_price(cl_asset, 30);
+        let cl_price_opt = self.chainlink_prices.fresh_price(cl_asset, 10); // 10s max age — 30s was too stale during fast reversals
 
         let (winning_side, winning_book, signal_source) = if let Some(cl_price) = cl_price_opt {
             let sigma = self.realized_vol(market.asset);
@@ -824,9 +830,29 @@ impl OracleEngine {
                 self.last_debug_log.insert(market.event_slug.clone(), now_inst);
             }
 
+            // Market-consensus cross-validation: the market's own orderbook is a real-time
+            // signal. If Chainlink says UP at 97% but the market is pricing UP at only 0.25,
+            // the oracle is almost certainly stale — a price reversal happened between Chainlink
+            // rounds. The market has already priced in the new direction. Reject the signal.
+            // market_implied_up = 1.0 - up_ask (the ask on the winning side ≈ its probability)
+            let market_implied_up = 1.0 - up_ask;   // if up_ask=0.25, market thinks UP is 75% likely
+            let market_implied_dn = 1.0 - dn_ask;
+            let cl_market_disagree_up = (fv_up - market_implied_up).abs();
+            let cl_market_disagree_dn = (fv_down - market_implied_dn).abs();
+
             if fv_up >= FAIR_VALUE_THRESHOLD && up_edge >= EDGE_THRESHOLD && up_ask <= MAX_SWEEP_PRICE {
+                if cl_market_disagree_up > MAX_MARKET_DISAGREEMENT {
+                    warn!("⚠️  CL/market disagreement UP {:.2} > {:.2} on {} — oracle likely stale, skipping",
+                          cl_market_disagree_up, MAX_MARKET_DISAGREEMENT, market.title);
+                    return;
+                }
                 (SweptSide::Up, up_book, "CL")
             } else if fv_down >= FAIR_VALUE_THRESHOLD && dn_edge >= EDGE_THRESHOLD && dn_ask <= MAX_SWEEP_PRICE {
+                if cl_market_disagree_dn > MAX_MARKET_DISAGREEMENT {
+                    warn!("⚠️  CL/market disagreement DN {:.2} > {:.2} on {} — oracle likely stale, skipping",
+                          cl_market_disagree_dn, MAX_MARKET_DISAGREEMENT, market.title);
+                    return;
+                }
                 (SweptSide::Down, down_book, "CL")
             } else {
                 return;

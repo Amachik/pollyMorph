@@ -87,19 +87,11 @@ python3 -m tools.weather.executor --dry-run --bankroll 164 --verbose
 ## 6. Install systemd service
 
 ```bash
-# Copy service file
+# Copy service file (already configured with --probe for first 2 weeks)
 cp /root/PollyMorph/weather-bot.service /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable weather-bot    # start on boot
-
-# Start in PROBE mode first ($1/bet for first 2 weeks)
-# Edit the service file to add --probe flag:
-nano /etc/systemd/system/weather-bot.service
-# Change ExecStart line to:
-# ExecStart=/usr/bin/python3 -m tools.weather.executor --loop --live --probe --bankroll 164
-
-systemctl daemon-reload
 systemctl start weather-bot
 ```
 

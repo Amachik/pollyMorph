@@ -834,11 +834,12 @@ impl OracleEngine {
             // signal. If Chainlink says UP at 97% but the market is pricing UP at only 0.25,
             // the oracle is almost certainly stale — a price reversal happened between Chainlink
             // rounds. The market has already priced in the new direction. Reject the signal.
-            // market_implied_up = 1.0 - up_ask (the ask on the winning side ≈ its probability)
-            let market_implied_up = 1.0 - up_ask;   // if up_ask=0.25, market thinks UP is 75% likely
-            let market_implied_dn = 1.0 - dn_ask;
-            let cl_market_disagree_up = (fv_up - market_implied_up).abs();
-            let cl_market_disagree_dn = (fv_down - market_implied_dn).abs();
+            //
+            // In a binary prediction market, the ASK price on the winning side IS the market's
+            // implied probability: up_ask=0.88 means the market thinks UP is 88% likely.
+            // Disagreement = |FV - ask|. If FV_dn=0.97 but dn_ask=0.25, disagreement=0.72 → REJECT.
+            let cl_market_disagree_up = (fv_up - up_ask).abs();
+            let cl_market_disagree_dn = (fv_down - dn_ask).abs();
 
             if fv_up >= FAIR_VALUE_THRESHOLD && up_edge >= EDGE_THRESHOLD && up_ask <= MAX_SWEEP_PRICE {
                 if cl_market_disagree_up > MAX_MARKET_DISAGREEMENT {

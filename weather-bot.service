@@ -19,6 +19,7 @@ KillSignal=SIGTERM
 
 # Environment — load from .env file in the project root
 EnvironmentFile=/root/PollyMorph/.env
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target

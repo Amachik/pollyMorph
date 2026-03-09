@@ -9,7 +9,7 @@ from typing import Optional
 # ─── Trading Parameters ──────────────────────────────────────────────────────
 
 # Minimum edge (forecast_prob - market_prob) to consider a trade
-MIN_EDGE = 0.12  # 12% (raised from 8% — need higher edge to be profitable at current accuracy)
+MIN_EDGE = 0.15  # 15% (raised from 12% — need higher edge to be profitable at current accuracy)
 
 # Maximum edge — if edge exceeds this, something may be wrong (stale market, bad data)
 MAX_EDGE = 0.45  # 45% (was 60%; huge edges are usually model errors)
@@ -29,11 +29,11 @@ NOISE_REPLICATIONS = 20
 # ─── Smart Bet Selection ─────────────────────────────────────────────────────
 
 # Only bet on buckets ranked in our top-N most likely outcomes
-TOP_N_BUCKETS = 3
+TOP_N_BUCKETS = 2
 
 # Minimum forecast probability on a bucket before we'll bet on it
 # Backtest: bets where our prob < 25% were 0W/17L = pure loss
-MIN_FORECAST_PROB = 0.30  # 30% (raised from 25% — bets below 30% forecast prob are too uncertain)
+MIN_FORECAST_PROB = 0.35  # 35% (raised from 30% — bets below 35% forecast prob are too uncertain)
 
 # Maximum bets per city+date to limit correlated losses
 # (Toronto, Buenos Aires often had 2-3 losing bets on same market)
@@ -54,6 +54,17 @@ MAX_LEAD_DAYS = 1
 # Spread penalty: if our top-2 buckets are very close in probability,
 # we're uncertain — require a larger edge
 SPREAD_EDGE_BOOST = 0.04  # Add 4% to min_edge when top-2 are within 5% of each other
+MIN_TOP2_PROB_GAP = 0.08
+NARROW_BUCKET_MAX_PRICE = 0.35
+EXACT_BUCKET_MAX_PRICE = 0.28
+TAIL_BUCKET_MAX_PRICE = 0.32
+
+# Disabled weather cities
+DISABLED_WEATHER_CITIES = {
+    "ankara",
+    "dallas",
+    "seoul",
+}
 
 # ─── API Endpoints ───────────────────────────────────────────────────────────
 
@@ -110,7 +121,7 @@ CITIES = {
         tz="America/New_York",
         wunderground_id="KLGA",
         wu_country="US",
-        obs_uncertainty=1.0,
+        obs_uncertainty=1.4,
     ),
     "chicago": City(
         name="Chicago",
@@ -122,7 +133,7 @@ CITIES = {
         tz="America/Chicago",
         wunderground_id="KORD",
         wu_country="US",
-        obs_uncertainty=1.0,
+        obs_uncertainty=1.4,
     ),
     "atlanta": City(
         name="Atlanta",
@@ -134,7 +145,7 @@ CITIES = {
         tz="America/New_York",
         wunderground_id="KATL",
         wu_country="US",
-        obs_uncertainty=1.0,
+        obs_uncertainty=1.2,
     ),
     "dallas": City(
         name="Dallas",
@@ -146,7 +157,7 @@ CITIES = {
         tz="America/Chicago",
         wunderground_id="KDAL",
         wu_country="US",
-        obs_uncertainty=1.0,
+        obs_uncertainty=1.5,
     ),
     "miami": City(
         name="Miami",
@@ -158,7 +169,7 @@ CITIES = {
         tz="America/New_York",
         wunderground_id="KMIA",
         wu_country="US",
-        obs_uncertainty=1.0,
+        obs_uncertainty=1.3,
     ),
     "seattle": City(
         name="Seattle",
@@ -170,7 +181,7 @@ CITIES = {
         tz="America/Los_Angeles",
         wunderground_id="KSEA",
         wu_country="US",
-        obs_uncertainty=1.0,
+        obs_uncertainty=1.2,
     ),
     "london": City(
         name="London",
@@ -194,7 +205,7 @@ CITIES = {
         tz="Asia/Seoul",
         wunderground_id="RKSI",
         wu_country="KR",
-        obs_uncertainty=0.8,
+        obs_uncertainty=1.0,
     ),
     "toronto": City(
         name="Toronto",
@@ -206,7 +217,7 @@ CITIES = {
         tz="America/Toronto",
         wunderground_id="CYYZ",
         wu_country="CA",
-        obs_uncertainty=0.8,
+        obs_uncertainty=1.0,
     ),
     "buenos_aires": City(
         name="Buenos Aires",
@@ -230,7 +241,7 @@ CITIES = {
         tz="Europe/Istanbul",
         wunderground_id="LTAC",
         wu_country="TR",
-        obs_uncertainty=0.8,
+        obs_uncertainty=1.0,
     ),
     "wellington": City(
         name="Wellington",

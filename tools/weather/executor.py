@@ -508,7 +508,7 @@ def cancel_stale_orders(client: ClobClient, max_age_minutes: int = SCAN_INTERVAL
 
 # ─── Main Executor ────────────────────────────────────────────────────────────
 
-PROBE_BET_SIZE = 1.0   # $1 per bet in probe mode
+PROBE_BET_SIZE = 4.0   # $4 per bet in probe mode
 
 
 async def execute_weather_bets(
@@ -526,16 +526,16 @@ async def execute_weather_bets(
     3. Place orders for new opportunities
     4. Track positions
 
-    probe_mode: cap all bets at $1 regardless of Kelly sizing.
+    probe_mode: cap all bets at $4 regardless of Kelly sizing.
     Use for the first 2 weeks to validate fill rates and edge
     before committing real capital.
     """
     if probe_mode and not dry_run:
-        mode_str = "🔬 PROBE MODE ($1/bet)"
+        mode_str = "🔬 PROBE MODE ($4/bet)"
     elif dry_run:
         mode_str = "🏷️  DRY RUN"
     else:
-        mode_str = "💰 LIVE TRADING"
+        mode_str = "� LIVE TRADING"
     print("\n" + "=" * 90)
     print(f"  🌤️  WEATHER BOT EXECUTOR — {mode_str}")
     print(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -673,7 +673,29 @@ async def execute_weather_bets(
 
     # Sort by edge (highest first) and limit
     new_opportunities.sort(key=lambda x: -x[3])
-    to_execute = new_opportunities[:max_orders_per_scan]
+
+    # One bet per city+date: take only the highest-edge opportunity per market.
+    # This prevents placing opposing bets on the same city+day (e.g. "30°C or below"
+    # AND "31°C" — mutually exclusive outcomes that guarantee one is a loss).
+    seen_city_date = set()
+    # Also include city+dates already open in positions
+    for p in positions.values():
+        if p.status == "open":
+            seen_city_date.add((p.city_key, p.target_date))
+
+    deduped = []
+    for opp in new_opportunities:
+        market, outcome = opp[0], opp[1]
+        cd_key = (market.city_key, str(market.target_date))
+        if cd_key in seen_city_date:
+            city = CITIES.get(market.city_key)
+            cn = city.name if city else market.city_key
+            print(f"\n⏭️  Already have bet on {cn} {market.target_date} — skipping \"{outcome.bucket.label}\"")
+            continue
+        seen_city_date.add(cd_key)
+        deduped.append(opp)
+
+    to_execute = deduped[:max_orders_per_scan]
 
     print(f"\n🎯 Executing {len(to_execute)} orders:")
     print("-" * 80)
@@ -685,7 +707,7 @@ async def execute_weather_bets(
         city = CITIES.get(market.city_key)
         cn = city.name if city else market.city_key
 
-        # In probe mode, cap bet at $1 regardless of Kelly
+        # In probe mode, cap bet at $4 regardless of Kelly
         actual_bet = PROBE_BET_SIZE if (probe_mode and not dry_run) else bet
 
         print(f"\n  📍 {cn} {market.target_date} — \"{outcome.bucket.label}\"")
@@ -1032,7 +1054,7 @@ def main():
     parser.add_argument("--rebuild-mos", action="store_true",
                         help="Force MOS rebuild regardless of cache freshness")
     parser.add_argument("--probe", action="store_true",
-                        help="Probe mode: cap all bets at $1 to validate fills & edge before scaling up")
+                        help="Probe mode: cap all bets at $4 to validate fills & edge before scaling up")
     parser.add_argument("--fill-report", action="store_true",
                         help="Print fill rate report from order log and exit")
     args = parser.parse_args()

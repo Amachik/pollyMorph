@@ -23,6 +23,8 @@ from .config import (
     CITIES, MIN_EDGE, MAX_EDGE, KELLY_FRACTION, MAX_BET_USDC, MIN_LIQUIDITY,
     TOP_N_BUCKETS, MIN_FORECAST_PROB, SAME_DAY_MIN_HOURS, SPREAD_EDGE_BOOST,
     MAX_BETS_PER_MARKET, MARKET_DISAGREE_CAP, MAX_LEAD_DAYS,
+    MIN_TOP2_PROB_GAP, NARROW_BUCKET_MAX_PRICE, EXACT_BUCKET_MAX_PRICE,
+    TAIL_BUCKET_MAX_PRICE, DISABLED_WEATHER_CITIES,
 )
 from .markets import WeatherMarket, WeatherOutcome, discover_weather_markets, market_summary
 from .forecast import (
@@ -111,6 +113,7 @@ def display_results(
     # Rank buckets by our forecast probability (for smart filtering)
     ranked = sorted(bucket_probs.items(), key=lambda x: -x[1])
     top_n_labels = {label for label, _ in ranked[:TOP_N_BUCKETS]}
+    top_gap = ranked[0][1] - ranked[1][1] if len(ranked) >= 2 else 1.0
 
     # Spread penalty: if our top-2 are very close, we're uncertain
     # City penalty: raise threshold for cities with poor historical accuracy
@@ -143,14 +146,24 @@ def display_results(
         # Smart filter: top-N + min forecast prob + min edge + not observe-only
         is_top_pick = label in top_n_labels
         meets_confidence = forecast_prob >= MIN_FORECAST_PROB
+        meets_gap = top_gap >= MIN_TOP2_PROB_GAP
 
         # Market disagree cap: skip when market prices very low
         # (when market says <5%, it's usually right even if we disagree)
         market_too_cheap = market_prob < MARKET_DISAGREE_CAP
+        bucket = outcome.bucket
+        is_exact_bucket = bucket.low == bucket.high
+        is_tail_bucket = bucket.low == float('-inf') or bucket.high == float('inf')
+        narrow_width = 0.0 if is_exact_bucket else (bucket.high - bucket.low)
+        price_too_high = (
+            (is_exact_bucket and market_prob > EXACT_BUCKET_MAX_PRICE)
+            or (is_tail_bucket and market_prob > TAIL_BUCKET_MAX_PRICE)
+            or ((not is_exact_bucket and not is_tail_bucket and narrow_width <= 1.0 and market_prob > NARROW_BUCKET_MAX_PRICE))
+        )
 
         if (edge > effective_min_edge and edge < MAX_EDGE
-                and market_prob > 0.01 and is_top_pick and meets_confidence
-                and not observe_only and not market_too_cheap):
+                and market_prob > 0.01 and is_top_pick and meets_confidence and meets_gap
+                and not observe_only and not market_too_cheap and not price_too_high):
             bet = calculate_kelly_bet(edge, market_prob, bankroll)
             ev = expected_value(forecast_prob, market_prob, bet)
             if bet >= 1.0:
@@ -164,6 +177,12 @@ def display_results(
                 signal = f"⚡ small"
         elif observe_only and edge > effective_min_edge and is_top_pick and meets_confidence:
             signal = "👁️ OBSERVE"
+        elif edge > effective_min_edge and price_too_high:
+            if verbose:
+                signal = "⚠️ pricey"
+        elif edge > effective_min_edge and not meets_gap:
+            if verbose:
+                signal = "⚠️ diffuse"
         elif edge > MIN_EDGE and not (is_top_pick and meets_confidence):
             if verbose:
                 reason = "long-shot" if not is_top_pick else "low-conf"
@@ -316,7 +335,7 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
     csv_path = os.path.join(os.path.dirname(__file__), "..", "weather_edges.csv") if csv_log else None
 
     # Load per-city performance stats to adjust edge thresholds
-    city_performance = load_city_performance(min_bets=1)
+    city_performance = load_city_performance(min_bets=5)
     if city_performance:
         print("\n📊 City performance (edge adjustments):")
         for ck, perf in sorted(city_performance.items()):
@@ -416,6 +435,10 @@ async def run_scanner(bankroll: float = 164.0, verbose: bool = False, csv_log: b
         for market in markets:
             city = CITIES.get(market.city_key)
             if not city:
+                continue
+            if market.city_key in DISABLED_WEATHER_CITIES:
+                if verbose:
+                    print(f"\n   ⏭️  Skipping {city.name} {market.target_date} — city disabled")
                 continue
 
             # Skip markets with very low liquidity

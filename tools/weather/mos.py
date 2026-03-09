@@ -86,8 +86,8 @@ RESIDUAL_BIAS_MAX = 3.0        # Cap residual correction at ±3° to avoid overc
 # Lead 0-1: WU is accurate (their own station, short-range)
 # Lead 2+: WU 5-day forecast degrades — widen significantly so WU doesn't
 # over-anchor the distribution when its own forecast is unreliable.
-WU_LEAD_STD = {0: 0.4, 1: 0.7, 2: 2.0, 3: 2.8}
-WU_LEAD_STD_DEFAULT = 3.5
+WU_LEAD_STD = {0: 0.6, 1: 1.0, 2: 2.2, 3: 3.0}
+WU_LEAD_STD_DEFAULT = 3.8
 
 # Total target samples for probability estimation
 N_TARGET_SAMPLES = 1000
@@ -521,7 +521,7 @@ def generate_mos_samples(
     has_wu = wu_forecast_temp is not None
     wu_frac = 0.0
     if has_wu:
-        wu_frac_by_lead = {0: 0.45, 1: 0.40, 2: 0.25, 3: 0.12}
+        wu_frac_by_lead = {0: 0.35, 1: 0.30, 2: 0.18, 3: 0.10}
         wu_frac = wu_frac_by_lead.get(lead_days, 0.07)
 
         # Dynamic WU boost: measure disagreement between WU and bias-corrected model consensus
@@ -543,10 +543,10 @@ def generate_mos_samples(
             city = CITIES.get(mos.city_key)
             scale = 1.8 if (city and city.unit == "F") else 1.0
             disagreement = abs(wu_forecast_temp - consensus) / scale  # in °C
-            # If WU disagrees by >1.5°C, boost WU weight by up to 50%
+            # If WU disagrees by >1.5°C, boost WU weight modestly
             if disagreement > 1.5:
-                boost = min(0.50, (disagreement - 1.5) * 0.25)
-                wu_frac = min(0.55, wu_frac * (1.0 + boost))
+                boost = min(0.25, (disagreement - 1.5) * 0.15)
+                wu_frac = min(0.42, wu_frac * (1.0 + boost))
 
     remaining = 1.0 - wu_frac
     mos_frac = remaining * (MOS_ERROR_FRAC / (MOS_ERROR_FRAC + RAW_ENSEMBLE_FRAC))
